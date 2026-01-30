@@ -1,0 +1,92 @@
+{
+    "invoice_metadata": {
+      "invoice_number": null,
+      "invoice_date": null,
+      "irn_number": null,
+      "acknowledgement_number": null,
+      "acknowledgement_date": null,
+      "sale_order_number": null,
+      "sale_order_date": null
+    },
+    "seller": {
+      "name": null,
+      "trade_name": null,
+      "address": null,
+      "city": null,
+      "state": null,
+      "state_code": null,
+      "pincode": null,
+      "country": null,
+      "gstin": null,
+      "pan": null,
+      "cin": null,
+      "email": null,
+      "phone": null,
+      "fax": null
+    },
+    "buyer": {
+      "name": null,
+      "address": null,
+      "city": null,
+      "state": null,
+      "state_code": null,
+      "pincode": null,
+      "country": null,
+      "gstin": null,
+      "pan": null,
+      "email": null,
+      "phone": null
+    },
+    "consignee": {
+      "name": null,
+      "address": null,
+      "city": null,
+      "state": null,
+      "pincode": null,
+      "country": null,
+      "gstin": null
+    },
+    "gst_details": {
+      "gst_customer_type": null,
+      "place_of_supply": null,
+      "reverse_charge_applicable": null
+    },
+    "line_items": [],
+    "totals": {
+      "total_line_items_count": null,
+      "total_parts_amount": null,
+      "total_discount_amount": null,
+      "total_taxable_value": null,
+      "cgst_total": null,
+      "sgst_total": null,
+      "igst_total": null,
+      "total_gst": null,
+      "other_charges": null,
+      "invoice_amount": null,
+      "invoice_amount_words": null,
+      "rounding_off_amount": null
+    },
+    "payments": [],
+    "shipping": {
+      "mode_of_transport": null,
+      "vehicle_no": null,
+      "lr_gr_no": null,
+      "lr_gr_date": null,
+      "carrier_name": null
+    },
+    "document_info": {
+      "document_type": null,
+      "delivery_note_no": null,
+      "delivery_note_date": null,
+      "dispatch_date": null,
+      "due_date": null,
+      "payment_terms": null
+    },
+    "extraction_metadata": {
+      "extraction_timestamp": null,
+      "source_file_name": null,
+      "extraction_confidence": null,
+      "notes": null
+    }
+  }
+  
