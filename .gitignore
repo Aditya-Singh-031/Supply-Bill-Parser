@@ -207,3 +207,20 @@ marimo/_lsp/
 __marimo__/
 .DS_Store
 .DS_Store
+
+# --- Added Custom Rules ---
+
+# Project Specific Data (Do not commit client data)
+invoices/
+bills_json/
+bills_excel/
+data_samples/*.pdf
+
+# IDE Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Files
+Thumbs.db

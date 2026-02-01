@@ -1,2 +1,22 @@
-pandas
-openpyxl
+# PDF Processing - Azure (optional)
+azure-ai-formrecognizer==3.3.2
+
+# PDF Processing - Fallback (always installed)
+PyPDF2==3.0.1
+pdfplumber==0.11.0
+
+# AI & LLM
+litellm==1.49.3
+openai==1.54.0
+pydantic==2.9.2
+
+# Data Processing
+pandas==2.2.2
+openpyxl==3.1.5
+
+# Utilities
+python-dotenv==1.0.1
+Pillow==10.4.0
+
+# Optional: Progress bars
+tqdm==4.66.5
