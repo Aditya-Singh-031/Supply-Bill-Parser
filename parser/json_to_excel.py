@@ -1,245 +1,305 @@
 """
-json_to_excel.py
+Unified Excel Consolidation Script
 
-Usage:
-- Place JSON invoice files in the 'bills_json' folder (relative to repo root).
-- Run: python parser/json_to_excel.py
-- Outputs Excel files into 'bills_excel' folder.
+Converts ALL invoice JSONs in bills_json/ into a SINGLE consolidated Excel file.
+After conversion, moves processed JSONs to bills_old_json/ archive.
 
-This script:
-- Recursively searches invoice JSONs for key fields (invoice number, date, vendor, totals).
-- Flattens line_items into tabular rows.
-- Writes one Excel per input JSON.
+Output: bills_excel/consolidated_invoices_YYYYMMDD_HHMMSS.xlsx
+
+Features:
+- One row per line item (flattened)
+- Invoice header columns + line item columns
+- Proper column ordering
+- Currency formatting
+- Auto-column width
 """
-
 
 import json
 import pandas as pd
-import os
-import re
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Any
+from models.invoice_schema import Invoice
+from parser.config import BILLS_JSON_DIR, BILLS_EXCEL_DIR, PROJECT_ROOT
 
-# --- CONFIGURATION ---
-INPUT_FOLDER = 'bills_json'
-OUTPUT_FOLDER = 'bills_excel'
-# ---------------------
 
-# --- KEYWORD DEFINITIONS ---
-# The script will look for these keys (case-insensitive) to find data
-INVOICE_NUM_KEYS = ['invoice_number', 'invoice_no', 'inv_no', 'bill_no', 'irn_number']
-DATE_KEYS = ['invoice_date', 'date', 'bill_date', 'issue_date', 'acknowledgement_date']
-VENDOR_KEYS = ['seller', 'supplier', 'vendor', 'biller', 'company_name']
-VENDOR_NAME_KEYS = ['name', 'trade_name', 'company', 'legal_name']
-TOTAL_KEYS = ['net_total', 'invoice_amount', 'total_amount', 'invoice_total', 'amount_due', 'total_payable', 'final_amount']
-LINE_ITEM_KEYS = ['line_items', 'items', 'products', 'services', 'breakdown', 'invoice_lines']
+# Archive folder for processed JSONs
+ARCHIVE_DIR = PROJECT_ROOT / "bills_old_json"
 
-def clean_currency_value(value):
-    """
-    Production-grade cleaner: removes currency symbols, commas, and spaces.
-    Converts 'Rs. 1,200.50' -> 1200.50
-    """
-    if value is None:
-        return 0.0
-    
-    # If it's already a number, return it
-    if isinstance(value, (int, float)):
-        return float(value)
-    
-    # Convert to string and clean
-    str_val = str(value).strip()
-    
-    # Remove everything except digits, dots, and minus signs
-    # This regex handles '1,234.56' -> '1234.56'
-    clean_str = re.sub(r'[^\d.-]', '', str_val)
-    
-    try:
-        return float(clean_str) if clean_str else 0.0
-    except ValueError:
-        return 0.0
 
-def recursive_search(data, target_keys):
+def flatten_invoice_to_rows(invoice: Invoice) -> List[Dict[str, Any]]:
     """
-    Depth-First Search (DFS) to find the FIRST occurrence of any key in target_keys.
-    Returns the value found.
-    """
-    if isinstance(data, dict):
-        # 1. Check current level
-        for k, v in data.items():
-            if k.lower() in [t.lower() for t in target_keys]:
-                return v
+    Convert Invoice object to list of rows (one per line item).
+    
+    Each row contains:
+    - Invoice metadata (number, date, seller, buyer, totals)
+    - Line item details (description, quantity, price, GST, etc.)
+    
+    Args:
+        invoice: Invoice Pydantic model
         
-        # 2. Recurse deeper
-        for k, v in data.items():
-            if isinstance(v, (dict, list)):
-                result = recursive_search(v, target_keys)
-                if result:
-                    return result
-                    
-    elif isinstance(data, list):
-        # Search inside list items
-        for item in data:
-            result = recursive_search(item, target_keys)
-            if result:
-                return result
-                
-    return None
-
-def extract_vendor_name(data):
+    Returns:
+        List of dicts, one per line item
     """
-    Special handling for Vendor Name because it's usually nested like:
-    "seller": { "name": "ABC Corp" }
-    """
-    # 1. Try to find the vendor object first (seller/supplier)
-    vendor_obj = recursive_search(data, VENDOR_KEYS)
-    
-    if isinstance(vendor_obj, dict):
-        # If we found a dict (e.g., the 'seller' object), look for 'name' inside it
-        name = recursive_search(vendor_obj, VENDOR_NAME_KEYS)
-        if name: return name
-        
-    # 2. If no object found, try searching for "vendor_name" or "seller_name" globally
-    flat_name_keys = ['vendor_name', 'seller_name', 'supplier_name']
-    name = recursive_search(data, flat_name_keys)
-    if name: return name
-
-    return "N/A"
-
-def process_single_file(filepath):
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            raw_data = f.read().strip()
-            if not raw_data:
-                return None
-            data = json.loads(raw_data)
-    except Exception as e:
-        print(f"❌ Error reading {os.path.basename(filepath)}: {e}")
-        return None
-
-    filename = os.path.basename(filepath)
-    
-    # --- STEP 1: EXTRACT HEADER DATA (Recursive) ---
-    header_info = {
-        'Source_File': filename,
-        'Vendor_Name': extract_vendor_name(data),
-        'Invoice_No': recursive_search(data, INVOICE_NUM_KEYS) or "N/A",
-        'Date': recursive_search(data, DATE_KEYS) or "N/A",
-        'Net_Total': 0.0
-    }
-    
-    # Extract and clean Total
-    raw_total = recursive_search(data, TOTAL_KEYS)
-    header_info['Net_Total'] = clean_currency_value(raw_total)
-
-    # --- STEP 2: FIND LINE ITEMS ---
-    # Try to find the list of items
-    line_items = recursive_search(data, LINE_ITEM_KEYS)
-    
-    # Fallback: Sometimes items are just the top-level list
-    if not line_items and isinstance(data, list):
-        line_items = data
-
     rows = []
-
-    # --- STEP 3: FLATTEN DATA ---
-    if line_items and isinstance(line_items, list) and len(line_items) > 0:
-        for item in line_items:
-            if not isinstance(item, dict): continue
+    
+    # Extract invoice-level data
+    inv_meta = invoice.invoice_metadata
+    seller = invoice.seller
+    buyer = invoice.buyer
+    totals = invoice.totals
+    
+    # Create one row per line item
+    for idx, item in enumerate(invoice.line_items, 1):
+        row = {
+            # ===== INVOICE METADATA =====
+            'Invoice_Number': inv_meta.invoice_number,
+            'Invoice_Date': inv_meta.invoice_date,
+            'IRN_Number': inv_meta.irn_number,
+            'Acknowledgement_Number': inv_meta.acknowledgement_number,
+            'Acknowledgement_Date': inv_meta.acknowledgement_date,
             
-            # Start with header info
-            row = header_info.copy()
+            # ===== SELLER INFO =====
+            'Seller_Name': seller.name,
+            'Seller_Trade_Name': seller.trade_name,
+            'Seller_City': seller.city,
+            'Seller_State': seller.state,
+            'Seller_GSTIN': seller.gstin,
+            'Seller_PAN': seller.pan,
             
-            # Merge ALL item fields (Dynamic Columns)
-            for k, v in item.items():
-                # We do NOT rename columns. We keep JSON keys as is.
-                # If you want numeric values cleaned, we check them here:
-                if 'price' in k.lower() or 'amount' in k.lower() or 'rate' in k.lower() or 'gst' in k.lower():
-                     # Attempt to clean currency fields, keep as original string if not cleanable
-                     clean_val = clean_currency_value(v)
-                     row[k] = clean_val if clean_val != 0 else v
-                else:
-                    row[k] = v
+            # ===== BUYER INFO =====
+            'Buyer_Name': buyer.name,
+            'Buyer_Trade_Name': buyer.trade_name,
+            'Buyer_City': buyer.city,
+            'Buyer_State': buyer.state,
+            'Buyer_GSTIN': buyer.gstin,
+            'Buyer_PAN': buyer.pan,
             
-            rows.append(row)
-    else:
-        # If no line items found, still create one row with header info
-        rows.append(header_info)
-
+            # ===== LINE ITEM DETAILS =====
+            'Line_Number': idx,
+            'Description': item.description,
+            'Part_Code': item.part_code,
+            'HSN_Code': item.hsn,
+            'Quantity': item.quantity,
+            'Unit': item.unit,
+            'Unit_Price': item.unit_price,
+            'Discount_Percent': item.discount_percent,
+            'Base_Amount': item.base_amount,
+            
+            # ===== GST BREAKDOWN =====
+            'CGST_Rate': item.cgst_rate,
+            'CGST_Amount': item.cgst_amount,
+            'SGST_Rate': item.sgst_rate,
+            'SGST_Amount': item.sgst_amount,
+            'IGST_Rate': item.igst_rate,
+            'IGST_Amount': item.igst_amount,
+            'Total_GST': item.total_gst,
+            
+            # ===== LINE ITEM TOTAL =====
+            'Amount_Incl_GST': item.amount_incl_gst,
+            
+            # ===== INVOICE TOTALS (repeated for every row) =====
+            'Invoice_Taxable_Value': totals.taxable_value,
+            'Invoice_Total_CGST': totals.total_cgst,
+            'Invoice_Total_SGST': totals.total_sgst,
+            'Invoice_Total_IGST': totals.total_igst,
+            'Invoice_Total_GST': totals.total_gst,
+            'Invoice_Grand_Total': totals.invoice_amount,
+            'Invoice_Item_Count': totals.total_line_items_count,
+        }
+        
+        rows.append(row)
+    
     return rows
 
-# --- MAIN EXECUTION LOOP ---
-if __name__ == "__main__":
-    if not os.path.exists(INPUT_FOLDER):
-        print(f"❌ Input folder '{INPUT_FOLDER}' not found.")
-        exit()
 
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
-        print(f"📂 Created output folder '{OUTPUT_FOLDER}'")
-
-    print(f"🚀 Processing files from '{INPUT_FOLDER}'...")
+def consolidate_invoices() -> pd.DataFrame:
+    """
+    Process all JSONs in bills_json/ and consolidate into single DataFrame.
     
-    for file in os.listdir(INPUT_FOLDER):
-        if file.endswith('.json'):
-            input_path = os.path.join(INPUT_FOLDER, file)
+    Returns:
+        DataFrame with all invoices combined
+    """
+    all_rows = []
+    processed_files = []
+    
+    json_files = list(BILLS_JSON_DIR.glob("*.json"))
+    
+    if not json_files:
+        print("⚠️  No JSON files found in bills_json/")
+        return pd.DataFrame(), processed_files
+    
+    print(f"📂 Found {len(json_files)} invoice JSON files")
+    print()
+    
+    for json_path in json_files:
+        try:
+            # Load JSON
+            with open(json_path, 'r') as f:
+                invoice_data = json.load(f)
             
-            excel_rows = process_single_file(input_path)
+            # Parse with Pydantic
+            invoice = Invoice.model_validate(invoice_data)
             
-            if excel_rows:
-                df = pd.DataFrame(excel_rows)
-                # --- NEW: REMOVE COMPLETELY BLANK COLUMNS ---
-                # 1. Replace literal empty strings with NaN so pandas sees them as "empty"
-                df = df.replace(r'^\s*$', pd.NA, regex=True)
-                
-                # 2. Drop columns where ALL values are NaN (empty)
-                df = df.dropna(axis=1, how='all')
-                # ---------------------------------------------
-                # --- INTELLIGENT COLUMN ORDERING ---
-                # Force specific columns to the left, leave others in natural order
-                priority_cols = ['Date', 'Invoice_No', 'Vendor_Name']
-                
-                # Get all available columns
-                available_cols = list(df.columns)
-                
-                # Build final order
-                final_order = [c for c in priority_cols if c in available_cols]
-                other_cols = [c for c in available_cols if c not in priority_cols and c != 'Source_File']
-                final_order.extend(other_cols)
-                if 'Source_File' in available_cols:
-                    final_order.append('Source_File') # Put source file last
-                
-                df = df[final_order]
-                
-                # Save
-                output_filename = os.path.splitext(file)[0] + ".xlsx"
-                output_path = os.path.join(OUTPUT_FOLDER, output_filename)
-                df.to_excel(output_path, index=False)
-                
-                print(f"✅ Success: {output_filename} (Rows: {len(df)})")
-            else:
-                print(f"⚠️ Skipped: {file} (No data extracted)")
-        import shutil
-
-    # --- NEW CONFIGURATION ---
-    ARCHIVE_FOLDER = 'bills_old_json'
-    # -------------------------
-
-    # Ensure archive folder exists
-    if not os.path.exists(ARCHIVE_FOLDER):
-        os.makedirs(ARCHIVE_FOLDER)
-        print(f"📂 Created archive folder '{ARCHIVE_FOLDER}'")
-
-    print("\n🧹 Moving processed JSON files to archive...")
-
-    # Move files
-    for file in os.listdir(INPUT_FOLDER):
-        if file.endswith('.json'):
-            src_path = os.path.join(INPUT_FOLDER, file)
-            dst_path = os.path.join(ARCHIVE_FOLDER, file)
+            # Flatten to rows
+            rows = flatten_invoice_to_rows(invoice)
+            all_rows.extend(rows)
             
-            try:
-                shutil.move(src_path, dst_path)
-                print(f"   Moved: {file}")
-            except Exception as e:
-                print(f"   ❌ Error moving {file}: {e}")
+            processed_files.append(json_path)
+            
+            print(f"✅ {json_path.name}: {len(invoice.line_items)} items")
+            
+        except Exception as e:
+            print(f"❌ Error processing {json_path.name}: {e}")
+            continue
+    
+    print()
+    
+    # Create DataFrame
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+        return df, processed_files
+    else:
+        return pd.DataFrame(), processed_files
 
-    print("✨ Cleanup complete.")
-    print("\n🎉 All processing complete.")
+
+def format_excel(df: pd.DataFrame, output_path: Path):
+    """
+    Write DataFrame to Excel with formatting.
+    
+    Args:
+        df: DataFrame to write
+        output_path: Output Excel file path
+    """
+    # Create Excel writer with xlsxwriter engine
+    with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+        df.to_excel(writer, sheet_name='Invoices', index=False)
+        
+        # Get workbook and worksheet
+        workbook = writer.book
+        worksheet = writer.sheets['Invoices']
+        
+        # Define formats
+        currency_format = workbook.add_format({'num_format': '₹#,##0.00'})
+        percent_format = workbook.add_format({'num_format': '0.00%'})
+        header_format = workbook.add_format({
+            'bold': True,
+            'bg_color': '#D3D3D3',
+            'border': 1
+        })
+        
+        # Format header row
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+        
+        # Auto-adjust column widths
+        for idx, col in enumerate(df.columns):
+            # Get max length of column content
+            max_len = max(
+                df[col].astype(str).map(len).max(),
+                len(str(col))
+            )
+            # Set width (add padding)
+            worksheet.set_column(idx, idx, max_len + 2)
+        
+        # Apply currency formatting to amount columns
+        currency_cols = [
+            'Unit_Price', 'Base_Amount', 
+            'CGST_Amount', 'SGST_Amount', 'IGST_Amount', 'Total_GST',
+            'Amount_Incl_GST',
+            'Invoice_Taxable_Value', 'Invoice_Total_CGST', 
+            'Invoice_Total_SGST', 'Invoice_Total_IGST', 'Invoice_Total_GST',
+            'Invoice_Grand_Total'
+        ]
+        
+        for col in currency_cols:
+            if col in df.columns:
+                col_idx = df.columns.get_loc(col)
+                worksheet.set_column(col_idx, col_idx, 15, currency_format)
+        
+        # Apply percent formatting
+        percent_cols = ['Discount_Percent', 'CGST_Rate', 'SGST_Rate', 'IGST_Rate']
+        for col in percent_cols:
+            if col in df.columns:
+                col_idx = df.columns.get_loc(col)
+                worksheet.set_column(col_idx, col_idx, 12, percent_format)
+    
+    print(f"✅ Excel file created: {output_path.name}")
+
+
+def archive_processed_files(file_paths: List[Path]):
+    """
+    Move processed JSON files to archive folder.
+    
+    Args:
+        file_paths: List of JSON file paths to archive
+    """
+    if not file_paths:
+        return
+    
+    # Create archive directory if it doesn't exist
+    ARCHIVE_DIR.mkdir(exist_ok=True)
+    
+    print(f"\n🗂️  Moving {len(file_paths)} processed files to archive...")
+    
+    for src_path in file_paths:
+        dst_path = ARCHIVE_DIR / src_path.name
+        
+        # Handle duplicate names in archive
+        counter = 1
+        while dst_path.exists():
+            stem = src_path.stem
+            dst_path = ARCHIVE_DIR / f"{stem}_{counter}.json"
+            counter += 1
+        
+        try:
+            src_path.rename(dst_path)
+            print(f"   ✓ Archived: {src_path.name}")
+        except Exception as e:
+            print(f"   ✗ Error archiving {src_path.name}: {e}")
+    
+    print(f"✅ Archive complete")
+
+
+def main():
+    """Main execution"""
+    print("=" * 60)
+    print("UNIFIED INVOICE CONSOLIDATION TO EXCEL")
+    print("=" * 60)
+    print()
+    
+    # Step 1: Consolidate all JSONs
+    print("Step 1: Consolidating invoices...")
+    df, processed_files = consolidate_invoices()
+    
+    if df.empty:
+        print("❌ No invoices to process. Exiting.")
+        return
+    
+    print(f"\n📊 Consolidated {len(df)} line items from {len(processed_files)} invoices")
+    
+    # Step 2: Create output filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"consolidated_invoices_{timestamp}.xlsx"
+    output_path = BILLS_EXCEL_DIR / output_filename
+    
+    # Ensure output directory exists
+    BILLS_EXCEL_DIR.mkdir(exist_ok=True)
+    
+    print(f"\nStep 2: Writing to Excel...")
+    format_excel(df, output_path)
+    
+    # Step 3: Archive processed files
+    archive_processed_files(processed_files)
+    
+    print()
+    print("=" * 60)
+    print("✨ PROCESSING COMPLETE")
+    print("=" * 60)
+    print(f"📁 Output: {output_path}")
+    print(f"📦 Archive: {ARCHIVE_DIR}")
+    print()
+
+
+if __name__ == "__main__":
+    main()
