@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 INVOICES_DIR = PROJECT_ROOT / "invoices"
 BILLS_JSON_DIR = PROJECT_ROOT / "bills_json"
 BILLS_EXCEL_DIR = PROJECT_ROOT / "bills_excel"
-DATA_SAMPLES_DIR = PROJECT_ROOT / "data_samples"
+DATA_SAMPLES_DIR = PROJECT_ROOT / "bills_pdf"
 
 # Azure Document Intelligence
 AZURE_DI_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "")
