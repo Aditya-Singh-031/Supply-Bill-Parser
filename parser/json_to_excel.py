@@ -252,7 +252,7 @@ def main():
     print(f"\n📊 Consolidated {len(df)} line items from {len(processed_files)} invoices")
     
     # Step 2: Create output filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H:%M")
     output_filename = f"consolidated_invoices_{timestamp}.xlsx"
     output_path = BILLS_EXCEL_DIR / output_filename
     
