@@ -5,13 +5,6 @@ Converts ALL invoice JSONs in bills_json/ into a SINGLE consolidated Excel file.
 After conversion, moves processed JSONs to bills_old_json/ archive.
 
 Output: bills_excel/consolidated_invoices_YYYYMMDD_HHMMSS.xlsx
-
-Features:
-- One row per line item (flattened)
-- Invoice header columns + line item columns
-- Proper column ordering
-- Currency formatting
-- Auto-column width
 """
 
 import json
@@ -30,16 +23,6 @@ ARCHIVE_DIR = PROJECT_ROOT / "bills_old_json"
 def flatten_invoice_to_rows(invoice: Invoice) -> List[Dict[str, Any]]:
     """
     Convert Invoice object to list of rows (one per line item).
-    
-    Each row contains:
-    - Invoice metadata (number, date, seller, buyer, totals)
-    - Line item details (description, quantity, price, GST, etc.)
-    
-    Args:
-        invoice: Invoice Pydantic model
-        
-    Returns:
-        List of dicts, one per line item
     """
     rows = []
     
@@ -78,7 +61,7 @@ def flatten_invoice_to_rows(invoice: Invoice) -> List[Dict[str, Any]]:
             # ===== LINE ITEM DETAILS =====
             'Line_Number': idx,
             'Description': item.description,
-            'Part_Code': item.part_code,
+            'Part_Code': item.parts_code,      # FIXED: was part_code
             'HSN_Code': item.hsn,
             'Quantity': item.quantity,
             'Unit': item.unit,
@@ -88,23 +71,23 @@ def flatten_invoice_to_rows(invoice: Invoice) -> List[Dict[str, Any]]:
             
             # ===== GST BREAKDOWN =====
             'CGST_Rate': item.cgst_rate,
-            'CGST_Amount': item.cgst_amount,
+            'CGST_Amount': item.cgst,          # FIXED: was cgst_amount
             'SGST_Rate': item.sgst_rate,
-            'SGST_Amount': item.sgst_amount,
+            'SGST_Amount': item.sgst,          # FIXED: was sgst_amount
             'IGST_Rate': item.igst_rate,
-            'IGST_Amount': item.igst_amount,
+            'IGST_Amount': item.igst,          # FIXED: was igst_amount
             'Total_GST': item.total_gst,
             
             # ===== LINE ITEM TOTAL =====
             'Amount_Incl_GST': item.amount_incl_gst,
             
-            # ===== INVOICE TOTALS (repeated for every row) =====
-            'Invoice_Taxable_Value': totals.taxable_value,
-            'Invoice_Total_CGST': totals.total_cgst,
-            'Invoice_Total_SGST': totals.total_sgst,
-            'Invoice_Total_IGST': totals.total_igst,
+            # ===== INVOICE TOTALS (Repeated) =====
+            'Invoice_Taxable_Value': totals.total_taxable_value, # FIXED: was taxable_value
+            'Invoice_Total_CGST': totals.cgst_total,             # FIXED: was total_cgst
+            'Invoice_Total_SGST': totals.sgst_total,             # FIXED: was total_sgst
+            'Invoice_Total_IGST': totals.igst_total,             # FIXED: was total_igst
             'Invoice_Total_GST': totals.total_gst,
-            'Invoice_Grand_Total': totals.invoice_amount,
+            'Invoice_Grand_Total': invoice.totals.invoice_amount,
             'Invoice_Item_Count': totals.total_line_items_count,
         }
         
@@ -116,9 +99,6 @@ def flatten_invoice_to_rows(invoice: Invoice) -> List[Dict[str, Any]]:
 def consolidate_invoices() -> pd.DataFrame:
     """
     Process all JSONs in bills_json/ and consolidate into single DataFrame.
-    
-    Returns:
-        DataFrame with all invoices combined
     """
     all_rows = []
     processed_files = []
@@ -166,10 +146,6 @@ def consolidate_invoices() -> pd.DataFrame:
 def format_excel(df: pd.DataFrame, output_path: Path):
     """
     Write DataFrame to Excel with formatting.
-    
-    Args:
-        df: DataFrame to write
-        output_path: Output Excel file path
     """
     # Create Excel writer with xlsxwriter engine
     with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
@@ -230,9 +206,6 @@ def format_excel(df: pd.DataFrame, output_path: Path):
 def archive_processed_files(file_paths: List[Path]):
     """
     Move processed JSON files to archive folder.
-    
-    Args:
-        file_paths: List of JSON file paths to archive
     """
     if not file_paths:
         return
