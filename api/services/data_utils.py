@@ -13,16 +13,11 @@ from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
 
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
-    """
-    Saves extracted data to MongoDB.
-    Handles data type conversion (Strings, Dates, Floats).
-    """
-    # 1. Extract Sub-objects (Handle Pydantic -> Dict structure)
+    # (This function was fine, keeping it consistent)
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
     buyer = data.get("buyer", {})
     
-    # 2. Date Handling (The Fix)
     raw_date = meta.get("invoice_date")
     final_date_str = None
     if raw_date:
@@ -31,7 +26,6 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         else:
             final_date_str = str(raw_date)
 
-    # 3. Create Invoice Object
     invoice_create = InvoiceCreate(
         job_id=job_id,
         file_hash=file_hash, 
@@ -48,7 +42,6 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         extraction_status=ExtractionStatus.COMPLETED
     )
 
-    # 4. Create Line Items
     line_items = []
     raw_items = data.get("line_items", [])
     
@@ -71,24 +64,24 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         )
         line_items.append(li)
 
-    # 5. Commit to DB
     bulk_payload = BulkInvoiceCreate(invoice=invoice_create, line_items=line_items)
     await db_service.create_invoice_with_line_items(bulk_payload)
 
 
 def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
     """
-    Creates a flattened Excel file using Pandas.
+    Creates a flattened Excel file.
+    Robustly handles keys from both DB (flat) and AI (nested).
     """
     flattened_data = []
 
     for invoice in data_list:
-        # Normalize fields (Handle DB vs Parser output differences)
+        # 1. Resolve Header Fields
+        # DB usually has them at top level, AI inside metadata
         inv_num = invoice.get("invoice_number") or invoice.get("invoice_metadata", {}).get("invoice_number")
         vendor = invoice.get("vendor_name") or invoice.get("seller", {}).get("name")
-        date_val = invoice.get("invoice_date") or invoice.get("invoice_metadata", {}).get("invoice_date")
         
-        # Format date for Excel
+        date_val = invoice.get("invoice_date") or invoice.get("invoice_metadata", {}).get("invoice_date")
         if isinstance(date_val, (datetime, date)):
             date_val = date_val.isoformat()
 
@@ -108,21 +101,29 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         for item in items:
             row = base_row.copy()
             
-            # Helper to safely multiply
+            # 2. Resolve Line Item Fields (The Fix)
+            # The DB uses 'part_number' and 'hsn_code'. 
+            # The AI might return 'part_no' or 'hsn' depending on prompt.
+            # We enforce checking multiple common keys.
+            
+            p_num = item.get("part_number") or item.get("part_no") or item.get("sku")
+            hsn = item.get("hsn_code") or item.get("hsn")
+            desc = item.get("description") or item.get("item_description")
+            
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             
             row.update({
-                "Part Number": item.get("part_number"),
-                "Description": item.get("description"),
-                "HSN": item.get("hsn_code"),
+                "Part Number": p_num,
+                "Description": desc,
+                "HSN": hsn,
                 "Quantity": qty,
                 "Unit Price": price,
                 "Total": qty * price
             })
             flattened_data.append(row)
 
-    # Save File
+    # Save
     df = pd.DataFrame(flattened_data)
     os.makedirs(BILLS_EXCEL_DIR, exist_ok=True)
     output_path = os.path.join(BILLS_EXCEL_DIR, f"Consolidated_Invoices_{job_id}.xlsx")

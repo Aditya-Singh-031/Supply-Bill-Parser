@@ -13,38 +13,29 @@ from api.core.redis_client import RedisClient
 from api.core.database import get_database
 from api.services.database_service import DatabaseService
 
-# --- IMPORT FROM NEW MODULES ---
 from api.services.extraction_worker import process_single_pdf_worker, calculate_file_hash
 from api.services.data_utils import save_to_mongo, generate_consolidated_excel
 
 async def process_invoices_background(job_id: str, file_paths: List[str]):
-    """
-    Main Orchestrator:
-    1. Checks hashes/duplicates
-    2. Spawns workers (CPU)
-    3. Saves data (IO)
-    4. Generates Excel
-    """
     print(f"🚀 Job {job_id}: Processing {len(file_paths)} files")
     
     db = get_database()
     db_service = DatabaseService(db)
 
-    # --- A. PRE-PROCESSING (Main Thread) ---
+    # --- A. PRE-PROCESSING ---
     worker_args = []
     for idx, path in enumerate(file_paths):
         f_hash = calculate_file_hash(path)
         existing = await db_service.get_invoice_by_hash(f_hash)
         worker_args.append((job_id, path, idx, f_hash, bool(existing)))
 
-    # --- B. PARALLEL PROCESSING (Workers) ---
+    # --- B. PARALLEL PROCESSING ---
     loop = asyncio.get_running_loop()
-    # Using 4 workers is usually optimal for local dev
     with ProcessPoolExecutor(max_workers=min(4, len(file_paths))) as executor:
         futures = [loop.run_in_executor(executor, process_single_pdf_worker, arg) for arg in worker_args]
         results = await asyncio.gather(*futures)
 
-    # --- C. SAVE RESULTS (Main Thread) ---
+    # --- C. SAVE & MERGE RESULTS ---
     successful_count = 0
     failed_count = 0
     valid_results = []
@@ -56,30 +47,49 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
         index = str(res["index"])
         
         if res["success"]:
-            # Handle File Storage & DB
             if res["is_duplicate"]:
                 print(f"   🔄 Duplicate found: {res['filename']}")
-                # Reconstruct data from DB for Excel
+                
+                # 1. Fetch Existing Data
                 existing = await db_service.get_invoice_by_hash(res["file_hash"])
                 if existing:
                     lines = await db_service.get_line_items_by_invoice(existing.invoice_id)
+                    
+                    # 2. Reconstruct Data for Excel
                     data = existing.dict()
                     data["line_items"] = [l.dict() for l in lines]
                     data["filename"] = res["filename"]
+                    
+                    # --- FIX 1: CALCULATE STATS ---
+                    item_count = len(lines)
+                    total_amt = sum(l.quantity * l.unit_price for l in lines if l.quantity and l.unit_price)
+                    
+                    # --- FIX 2: UPDATE REDIS SO UI SHOWS DATA ---
+                    RedisClient.update_pdf_progress(
+                        job_id, 
+                        index, 
+                        "completed", 
+                        100, 
+                        f"Duplicate (Found {item_count} items)",
+                        line_items=item_count,
+                        total_amount=total_amt
+                    )
+                    
                     valid_results.append(data)
                     successful_count += 1
                 
-                # Delete temp file
+                # Cleanup temp file
                 if os.path.exists(res["temp_path"]): os.remove(res["temp_path"])
                 
             else:
-                # Save New Invoice
+                # NEW FILE SAVE
                 try:
                     final_path = os.path.join(storage_dir, f"{job_id}_{res['filename']}")
                     shutil.move(res["temp_path"], final_path)
                     
                     await save_to_mongo(db_service, UUID(job_id), f"{job_id}_{res['filename']}", res["data"], res["file_hash"])
                     
+                    # Stats are already sent by worker for new files, but we confirm success here
                     RedisClient.update_pdf_progress(job_id, index, "completed", 100, "Saved")
                     successful_count += 1
                     
