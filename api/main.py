@@ -10,8 +10,11 @@ from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
 from api.core.database import connect_to_mongo, close_mongo_connection
 from api.core.redis_client import RedisClient
 
-# --- 1. IMPORT THE NEW ROUTER HERE ---
-from api.routes import invoice, auth, users, dashboard
+# --- EXPLICIT IMPORTS ---
+from api.routes import invoice
+from api.routes import auth
+from api.routes import users
+from api.routes import dashboard
 
 # Startup and shutdown events
 @asynccontextmanager
@@ -19,17 +22,17 @@ async def lifespan(app: FastAPI):
     """Handle startup and shutdown"""
     # Startup
     print("🚀 Starting Invoice Parser API...")
-    print(f"   API Version: {API_VERSION}")
-    print(f"   Prefix: {API_PREFIX}")
-    
-    # Connect to MongoDB
     await connect_to_mongo()
     
-    # Test Redis connection
     if RedisClient.ping():
         print("✅ Redis connection successful")
-    else:
-        print("⚠️  Redis connection failed - job tracking will not work!")
+    
+    # --- DEBUG: PRINT ALL REGISTERED ROUTES ---
+    print("\n📍 REGISTERED ROUTES:")
+    for route in app.routes:
+        if hasattr(route, "path"):
+            print(f"   👉 {route.path}")
+    print("\n")
     
     yield
     
@@ -41,7 +44,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Morsebiz Invoice Parser API",
-    description="AI-powered invoice extraction API with multiprocessing",
+    description="AI-powered invoice extraction API",
     version=API_VERSION,
     lifespan=lifespan
 )
@@ -55,46 +58,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. REGISTER THE ROUTER HERE ---
+# --- REGISTER ROUTERS ---
 app.include_router(invoice.router, prefix=API_PREFIX + "/invoices", tags=["Invoices"])
 app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
 app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])
 app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"])
 
-
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    redis_ok = RedisClient.ping()
-    
-    return {
-        "status": "healthy" if redis_ok else "degraded",
-        "redis": "connected" if redis_ok else "disconnected",
-        "version": API_VERSION
-    }
+    return {"status": "healthy"}
 
-
-# Root endpoint
 @app.get("/")
 async def root():
-    """Root endpoint"""
-    return {
-        "message": "Morsebiz Invoice Parser API",
-        "version": API_VERSION,
-        "docs": "/docs",
-        "health": "/health"
-    }
-
-
-# Global exception handler
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Handle uncaught exceptions"""
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "detail": str(exc)
-        }
-    )
+    return {"message": "Morsebiz Invoice Parser API"}
