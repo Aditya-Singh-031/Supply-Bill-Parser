@@ -20,3 +20,8 @@ sse-starlette==2.1.3
 
 # Async support
 aiofiles==24.1.0
+
+# Add to existing requirements
+motor==3.3.2  # Async MongoDB driver
+pymongo==4.6.1  # MongoDB driver
+pydantic==2.5.3  # Already there, but ensure version
