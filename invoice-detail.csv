@@ -1,0 +1,31 @@
+Field Name,Description,Data Type,Example,Constraints,Business Purpose
+line_item_id,Unique line item ID,UUID,660e8400-e29b-41d4-a716-446655440001,Primary Key | Indexed,Unique identification
+invoice_id,Parent invoice reference,UUID,550e8400-e29b-41d4-a716-446655440000,Foreign Key | Indexed,Link to parent invoice
+sl_number,Serial number in invoice,Integer,1,,Line item sequence
+item_description,Product/service description,String,HP Laptop 15s-EQ2143AU,Text indexed,Item identification
+hsn_sac_code,HSN/SAC code,String,8471,,Tax classification
+sku_code,Stock Keeping Unit code,String,HP-LAP-15SEQ2143,Optional | Indexed,Inventory tracking
+brand,Product brand,String,HP,Optional,Brand analysis
+unit_of_measurement,Unit (pcs kg litre etc.),String,Nos,"Nos, Kg, Ltr, Box",Quantity type
+quantity,Quantity ordered,Float,10,,Inventory calculation
+unit_price,Price per unit (excluding tax),Float,45000.00,,Price tracking
+discount_percent,Discount percentage,Float,5.0,Optional,Discount analysis
+discount_amount,Discount in currency,Float,22500.00,Calculated,Financial calculation
+taxable_amount,Amount before tax,Float,427500.00,After discount,Tax base calculation
+cgst_rate,CGST rate %,Float,9.0,For India,Tax calculation
+cgst_amount,CGST amount,Float,38475.00,Calculated,Tax calculation
+sgst_rate,SGST rate %,Float,9.0,For India,Tax calculation
+sgst_amount,SGST amount,Float,38475.00,Calculated,Tax calculation
+igst_rate,IGST rate %,Float,0.0,Inter-state,Tax calculation
+igst_amount,IGST amount,Float,0.0,Inter-state,Tax calculation
+total_tax,Total tax for line,Float,76950.00,Sum of all taxes,Tax reconciliation
+line_total,Total including tax,Float,504450.00,Final amount,Financial verification
+extraction_confidence,AI confidence for this line,Float,0.92,0 to 1,Quality control
+manual_correction_flag,Whether manually edited,Boolean,false,,Audit trail
+correction_details,What was corrected,String,null,Details of changes,Audit trail
+error_flag,Whether this line has issues,Boolean,false,,Issue tracking
+error_details,Error description,String,null,Null if no errors,Debugging
+comments,Line-specific comments,String,Check warranty,Optional,Business notes
+created_at,Record creation time,Timestamp,2026-02-03T19:11:28Z,Auto-generated,Audit trail
+last_updated_at,Last modification time,Timestamp,2026-02-03T19:11:28Z,Auto-updated,Audit trail
+last_updated_by,Who last modified,String,akash.sharma,,Audit trail

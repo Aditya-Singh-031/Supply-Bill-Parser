@@ -224,3 +224,4 @@ data_samples/*.pdf
 
 # OS Files
 Thumbs.db
+/temp_uploads
