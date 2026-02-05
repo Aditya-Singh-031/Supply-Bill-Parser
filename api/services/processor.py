@@ -225,51 +225,69 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
 # =========================================================
 # 4. HELPER FUNCTIONS
 # =========================================================
+# ... (rest of file above remains same) ...
+
 async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
+    # Extract Sub-objects
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
     buyer = data.get("buyer", {})
     
+    # --- DATE HANDLING FIX ---
+    # Convert date object to string if needed
+    raw_date = meta.get("invoice_date")
+    final_date_str = None
+    if raw_date:
+        if isinstance(raw_date, (datetime, datetime.date)):
+            final_date_str = raw_date.isoformat()
+        else:
+            final_date_str = str(raw_date)
+
+    # 1. Create Invoice Object
     invoice_create = InvoiceCreate(
         job_id=job_id,
-        file_hash=file_hash, # Save Hash!
-        invoice_number=meta.get("invoice_number"),
-        invoice_date=meta.get("invoice_date"), 
+        file_hash=file_hash, 
+        invoice_number=str(meta.get("invoice_number") or "UNKNOWN"),
+        invoice_date=final_date_str,  # <--- FIXED HERE
         vendor_name=seller.get("name"),
         vendor_gstin=seller.get("gstin"),
         buyer_name=buyer.get("name"),
         buyer_gstin=buyer.get("gstin"),
         po_number=meta.get("po_number"),
         total_quantity=0.0,
-        # We don't have a local path anymore, so leave null or put a placeholder
-        pdf_url=None, 
+        pdf_url=f"/storage/pdfs/{filename}", 
         extraction_confidence=0.95,
         extraction_status=ExtractionStatus.COMPLETED
     )
 
+    # 2. Line Items
     line_items = []
     raw_items = data.get("line_items", [])
     
     for idx, item in enumerate(raw_items, 1):
         def safe_float(val):
-            try: return float(str(val).replace(",", "").strip()) if val else 0.0
+            if val is None: return 0.0
+            try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
         li = LineItemCreate(
             invoice_id=uuid4(),
             sl_number=idx,
-            part_number=item.get("part_number"),
-            description=item.get("description"),
-            hsn_code=item.get("hsn_code"),
+            part_number=str(item.get("part_number") or ""),
+            description=str(item.get("description") or ""),
+            hsn_code=str(item.get("hsn_code") or ""),
             quantity=safe_float(item.get("quantity")),
             unit_price=safe_float(item.get("unit_price")),
-            discount_percent=safe_float(item.get("discount_percent") or item.get("discount", 0)),
-            igst_rate=safe_float(item.get("tax_rate") or item.get("igst_rate", 0))
+            discount_percent=safe_float(item.get("discount_percent") or item.get("discount")),
+            igst_rate=safe_float(item.get("tax_rate") or item.get("igst_rate"))
         )
         line_items.append(li)
 
+    # 3. Save
     bulk_payload = BulkInvoiceCreate(invoice=invoice_create, line_items=line_items)
     await db_service.create_invoice_with_line_items(bulk_payload)
+
+# ... (rest of file below remains same) ...
 
 
 def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
