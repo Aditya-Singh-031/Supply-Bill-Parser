@@ -24,29 +24,32 @@ from api.models.schemas import (
 # 1. PARSER WRAPPER (Handles Import & Execution)
 # =========================================================
 try:
-    # Try to import the level1 extractor directly
+    # 1. Import the PDF Parser (The missing link!)
+    from parser.pdf_parser import extract_invoice_content
+    
+    # 2. Import the AI Extractor
     from parser.ai_extractor import extract_invoice_level1
     
     def extract_and_validate_invoice(file_path):
         filename = os.path.basename(file_path)
         try:
-            # Open file as bytes
-            with open(file_path, 'rb') as f:
-                content = f.read()
+            # --- STEP 1: PARSE PDF (Extract Text & Tables) ---
+            # We pass the file path, as your pdf_parser expects it
+            print(f"   📄 Parsing PDF structure for: {filename}")
+            invoice_content_dict = extract_invoice_content(file_path)
             
-            # Call your existing function
-            raw_result = extract_invoice_level1(content, filename)
+            # --- STEP 2: AI EXTRACTION ---
+            # Now we pass the Dictionary, not bytes
+            print(f"   🤖 Sending to AI for extraction: {filename}")
+            raw_result = extract_invoice_level1(invoice_content_dict, filename)
             
-            # --- CRITICAL FIX: CONVERT RESULT TO DICT ---
-            # If it's a Pydantic Model (v1 or v2), convert to dict
+            # --- STEP 3: CONVERT TO DICT ---
             if hasattr(raw_result, "model_dump"):
                 return raw_result.model_dump()
             elif hasattr(raw_result, "dict"):
                 return raw_result.dict()
-            # If it's already a dict, return it
             elif isinstance(raw_result, dict):
                 return raw_result
-            # If it's bytes/str (the error source), fail gracefully
             else:
                 return {"error": f"Parser returned invalid format: {type(raw_result)}"}
                 
@@ -56,9 +59,10 @@ try:
             return {"error": str(e)}
 
 except ImportError as e:
-    print(f"⚠️ WARNING: Could not import parser.ai_extractor: {e}")
+    print(f"⚠️ WARNING: Could not import parser modules: {e}")
+    # Fallback to prevent crash if files are missing
     def extract_and_validate_invoice(path):
-        return {"error": "Parser module missing or import failed"}
+        return {"error": f"Parser module missing: {str(e)}"}
 
 
 # =========================================================
@@ -73,13 +77,13 @@ def process_single_pdf_worker(args):
 
     try:
         # 1. Update Redis: Parsing Started
-        RedisClient.update_pdf_progress(job_id, str(index), "parsing", 10, "Extracting text...")
+        RedisClient.update_pdf_progress(job_id, str(index), "parsing", 10, "Extracting text & tables...")
 
         # 2. RUN AI EXTRACTION
-        print(f"   📄 Worker processing: {filename}")
+        print(f"   ⚡ Worker processing: {filename}")
         result = extract_and_validate_invoice(file_path)
         
-        # 3. Check for Errors (Safe Check)
+        # 3. Check for Errors
         if not result or (isinstance(result, dict) and result.get("error")):
             error_msg = result.get("error") if isinstance(result, dict) else "Unknown error"
             RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, f"Error: {error_msg}")
@@ -87,7 +91,13 @@ def process_single_pdf_worker(args):
 
         # 4. Success
         line_items_count = len(result.get("line_items", []))
-        total_amt = result.get("total_amount", 0.0)
+        # Handle deep nesting if your schema uses invoice_metadata.invoice_amount etc.
+        # But usually raw_result flat dict works. Let's try to find total amount safely.
+        total_amt = 0.0
+        if "totals" in result:
+             total_amt = result["totals"].get("invoice_amount", 0.0)
+        elif "total_amount" in result:
+             total_amt = result.get("total_amount", 0.0)
         
         RedisClient.update_pdf_progress(
             job_id, 
@@ -194,7 +204,7 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
         "excel_filename": os.path.basename(excel_path) if excel_path else None
     }
     
-    # Merge with existing data to keep start time etc.
+    # Merge with existing data
     current_job = RedisClient.get_job(job_id) or {}
     current_job.update(job_update)
     RedisClient.set_job(job_id, current_job)
@@ -216,33 +226,43 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
 async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict):
     """Maps dictionary data to Pydantic Schemas and saves to DB."""
     
-    # 1. Create Invoice Object
+    # Handle Nested Schema (Invoice -> invoice_metadata / seller / etc)
+    # This logic bridges your Complex AI Schema with the simpler DB Schema
+    
+    # Extract Helpers
+    meta = data.get("invoice_metadata", {})
+    seller = data.get("seller", {})
+    buyer = data.get("buyer", {})
+    
+    # Map Fields
     invoice_create = InvoiceCreate(
         job_id=job_id,
-        invoice_number=str(data.get("invoice_number", "UNKNOWN")),
-        invoice_date=None, 
-        vendor_name=data.get("vendor", {}).get("name") or data.get("vendor_name"),
-        vendor_gstin=data.get("vendor", {}).get("gstin") or data.get("vendor_gstin"),
-        buyer_name=data.get("buyer", {}).get("name") or data.get("buyer_name"),
-        buyer_gstin=data.get("buyer", {}).get("gstin") or data.get("buyer_gstin"),
-        total_quantity=0.0, 
+        invoice_number=meta.get("invoice_number"),
+        invoice_date=None, # You can implement date parsing here if needed
+        vendor_name=seller.get("name"),
+        vendor_gstin=seller.get("gstin"),
+        buyer_name=buyer.get("name"),
+        buyer_gstin=buyer.get("gstin"),
+        po_number=meta.get("po_number"),
+        total_quantity=0.0, # Calculated from lines
         pdf_url=f"local://{filename}", 
-        extraction_confidence=data.get("confidence", 0.95),
+        extraction_confidence=0.95,
         extraction_status=ExtractionStatus.COMPLETED
     )
 
-    # 2. Create Line Item Objects
+    # Create Line Items
     line_items = []
     raw_items = data.get("line_items", [])
     
     for idx, item in enumerate(raw_items, 1):
-        qty = item.get("quantity", 0.0) or 0.0
-        price = item.get("unit_price", 0.0) or 0.0
+        # Handle amounts safely
+        qty = item.get("quantity")
+        price = item.get("unit_price")
         
-        # Safe float conversion
-        try: qty = float(qty)
+        try: qty = float(qty) if qty else 0.0
         except: qty = 0.0
-        try: price = float(price)
+        
+        try: price = float(price) if price else 0.0
         except: price = 0.0
 
         li = LineItemCreate(
@@ -253,11 +273,11 @@ async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: st
             hsn_code=item.get("hsn_code"),
             quantity=qty,
             unit_price=price,
-            igst_rate=None 
+            igst_rate=item.get("tax_rate") # or "igst_rate" depending on your AI output
         )
         line_items.append(li)
 
-    # 3. Save via Bulk Service
+    # Save to DB
     bulk_payload = BulkInvoiceCreate(invoice=invoice_create, line_items=line_items)
     await db_service.create_invoice_with_line_items(bulk_payload)
 
@@ -267,8 +287,12 @@ def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
     flattened_data = []
 
     for invoice in data_list:
-        inv_num = invoice.get("invoice_number", "N/A")
-        vendor = invoice.get("vendor", {}).get("name") or invoice.get("vendor_name", "N/A")
+        # Extract fields safely using your Schema structure
+        meta = invoice.get("invoice_metadata", {})
+        seller = invoice.get("seller", {})
+        
+        inv_num = meta.get("invoice_number", "N/A")
+        vendor = seller.get("name", "N/A")
         
         items = invoice.get("line_items", [])
         if not items:
@@ -288,8 +312,7 @@ def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
                 "Description": item.get("description"),
                 "HSN": item.get("hsn_code"),
                 "Quantity": item.get("quantity"),
-                "Unit Price": item.get("unit_price"),
-                "Total": item.get("amount")
+                "Unit Price": item.get("unit_price")
             })
 
     # Save to Excel
