@@ -1,5 +1,3 @@
-# api/services/data_utils.py
-
 import os
 import pandas as pd
 from uuid import UUID, uuid4
@@ -13,7 +11,6 @@ from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
 
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
-    # (This function was fine, keeping it consistent)
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
     buyer = data.get("buyer", {})
@@ -51,12 +48,22 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
+        # --- KEY MAPPING FIX FOR DB SAVE ---
+        # Ensure we capture part number even if AI calls it something else
+        p_num = (
+            item.get("part_number") or 
+            item.get("part_no") or 
+            item.get("item_code") or 
+            item.get("sku") or 
+            ""
+        )
+        
         li = LineItemCreate(
             invoice_id=uuid4(),
             sl_number=idx,
-            part_number=str(item.get("part_number") or ""),
+            part_number=str(p_num),
             description=str(item.get("description") or ""),
-            hsn_code=str(item.get("hsn_code") or ""),
+            hsn_code=str(item.get("hsn_code") or item.get("hsn") or ""),
             quantity=safe_float(item.get("quantity")),
             unit_price=safe_float(item.get("unit_price")),
             discount_percent=safe_float(item.get("discount_percent") or item.get("discount")),
@@ -70,14 +77,11 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
 
 def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
     """
-    Creates a flattened Excel file.
-    Robustly handles keys from both DB (flat) and AI (nested).
+    Creates Excel. Aggressively checks for Part Number variations.
     """
     flattened_data = []
 
     for invoice in data_list:
-        # 1. Resolve Header Fields
-        # DB usually has them at top level, AI inside metadata
         inv_num = invoice.get("invoice_number") or invoice.get("invoice_metadata", {}).get("invoice_number")
         vendor = invoice.get("vendor_name") or invoice.get("seller", {}).get("name")
         
@@ -101,12 +105,17 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         for item in items:
             row = base_row.copy()
             
-            # 2. Resolve Line Item Fields (The Fix)
-            # The DB uses 'part_number' and 'hsn_code'. 
-            # The AI might return 'part_no' or 'hsn' depending on prompt.
-            # We enforce checking multiple common keys.
+            # --- AGGRESSIVE KEY CHECK ---
+            # Check every possible name for Part Number
+            p_num = (
+                item.get("part_number") or 
+                item.get("part_no") or 
+                item.get("item_code") or 
+                item.get("material_code") or 
+                item.get("sku") or 
+                item.get("product_id")
+            )
             
-            p_num = item.get("part_number") or item.get("part_no") or item.get("sku")
             hsn = item.get("hsn_code") or item.get("hsn")
             desc = item.get("description") or item.get("item_description")
             
@@ -123,7 +132,6 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
             })
             flattened_data.append(row)
 
-    # Save
     df = pd.DataFrame(flattened_data)
     os.makedirs(BILLS_EXCEL_DIR, exist_ok=True)
     output_path = os.path.join(BILLS_EXCEL_DIR, f"Consolidated_Invoices_{job_id}.xlsx")

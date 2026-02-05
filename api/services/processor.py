@@ -1,5 +1,3 @@
-# api/services/processor.py
-
 import os
 import asyncio
 import shutil
@@ -47,52 +45,63 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
         index = str(res["index"])
         
         if res["success"]:
+            # 1. DUPLICATE CASE
             if res["is_duplicate"]:
                 print(f"   🔄 Duplicate found: {res['filename']}")
-                
-                # 1. Fetch Existing Data
                 existing = await db_service.get_invoice_by_hash(res["file_hash"])
+                
                 if existing:
                     lines = await db_service.get_line_items_by_invoice(existing.invoice_id)
-                    
-                    # 2. Reconstruct Data for Excel
                     data = existing.dict()
                     data["line_items"] = [l.dict() for l in lines]
                     data["filename"] = res["filename"]
                     
-                    # --- FIX 1: CALCULATE STATS ---
+                    # Calc Stats for UI
                     item_count = len(lines)
                     total_amt = sum(l.quantity * l.unit_price for l in lines if l.quantity and l.unit_price)
                     
-                    # --- FIX 2: UPDATE REDIS SO UI SHOWS DATA ---
                     RedisClient.update_pdf_progress(
-                        job_id, 
-                        index, 
-                        "completed", 
-                        100, 
-                        f"Duplicate (Found {item_count} items)",
-                        line_items=item_count,
-                        total_amount=total_amt
+                        job_id, index, "completed", 100, 
+                        f"Duplicate ({item_count} items)", 
+                        line_items=item_count, total_amount=total_amt
                     )
                     
                     valid_results.append(data)
                     successful_count += 1
                 
-                # Cleanup temp file
                 if os.path.exists(res["temp_path"]): os.remove(res["temp_path"])
                 
+            # 2. NEW FILE CASE (The Fix)
             else:
-                # NEW FILE SAVE
                 try:
                     final_path = os.path.join(storage_dir, f"{job_id}_{res['filename']}")
                     shutil.move(res["temp_path"], final_path)
                     
                     await save_to_mongo(db_service, UUID(job_id), f"{job_id}_{res['filename']}", res["data"], res["file_hash"])
                     
-                    # Stats are already sent by worker for new files, but we confirm success here
-                    RedisClient.update_pdf_progress(job_id, index, "completed", 100, "Saved")
-                    successful_count += 1
+                    # --- FIX START: Calculate Stats for New Files ---
+                    raw_items = res["data"].get("line_items", [])
+                    item_count = len(raw_items)
                     
+                    # Calculate total safely from the raw dict
+                    total_amt = 0.0
+                    for item in raw_items:
+                        try:
+                            q = float(str(item.get("quantity", 0)).replace(",", ""))
+                            p = float(str(item.get("unit_price", 0)).replace(",", ""))
+                            total_amt += (q * p)
+                        except: pass
+
+                    # Send Stats to Redis (So UI shows them)
+                    RedisClient.update_pdf_progress(
+                        job_id, index, "completed", 100, 
+                        "Saved", 
+                        line_items=item_count, 
+                        total_amount=total_amt
+                    )
+                    # --- FIX END ---
+
+                    successful_count += 1
                     data = res["data"].copy()
                     data["filename"] = res["filename"]
                     valid_results.append(data)
@@ -107,7 +116,7 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
             failed_count += 1
             if os.path.exists(res.get("temp_path", "")): os.remove(res.get("temp_path", ""))
 
-    # --- D. FINALIZE ---
+    # --- D. GENERATE EXCEL ---
     excel_path = None
     if valid_results:
         try:
