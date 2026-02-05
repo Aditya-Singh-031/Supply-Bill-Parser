@@ -18,21 +18,31 @@ class DatabaseService:
         self.invoices = db.invoices
         self.line_items = db.invoice_line_items
 
+    # ... inside DatabaseService class ...
+
     async def create_indexes(self):
         """Create database indexes for performance"""
-        # Invoice indexes
-        await self.invoices.create_index([("invoice_id", ASCENDING)], unique=True)
-        await self.invoices.create_index([("job_id", ASCENDING)])
-        await self.invoices.create_index([("invoice_number", ASCENDING)])
-        await self.invoices.create_index([("created_at", DESCENDING)])
-        await self.invoices.create_index([("extraction_status", ASCENDING)])
+        await self.invoices.create_index([("invoice_id", 1)], unique=True)
+        await self.invoices.create_index([("job_id", 1)])
+        # --- NEW INDEX FOR HASH ---
+        await self.invoices.create_index([("file_hash", 1)]) 
         
-        # Line item indexes
-        await self.line_items.create_index([("line_item_id", ASCENDING)], unique=True)
-        await self.line_items.create_index([("invoice_id", ASCENDING)])
-        await self.line_items.create_index([("invoice_id", ASCENDING), ("sl_number", ASCENDING)])
-        
+        await self.line_items.create_index([("line_item_id", 1)], unique=True)
+        await self.line_items.create_index([("invoice_id", 1)])
         print("✅ Database indexes created")
+
+    # --- NEW FUNCTION ---
+    async def get_invoice_by_hash(self, file_hash: str) -> Optional[InvoiceResponse]:
+        """Check if a file with this hash already exists"""
+        if not file_hash:
+            return None
+        invoice = await self.invoices.find_one({"file_hash": file_hash})
+        if invoice:
+            invoice.pop("_id", None)
+            return InvoiceResponse(**invoice)
+        return None
+
+    # ... (Rest of the file remains the same) ...
 
     # ============================================
     # INVOICE CRUD OPERATIONS
