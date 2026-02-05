@@ -10,6 +10,7 @@ from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
 from api.core.redis_client import RedisClient
 from api.routes import invoice
 
+from api.core.database import connect_to_mongo, close_mongo_connection
 
 # Startup and shutdown events
 @asynccontextmanager
@@ -17,6 +18,7 @@ async def lifespan(app: FastAPI):
     """Handle startup and shutdown"""
     # Startup
     print("🚀 Starting Invoice Parser API...")
+    await connect_to_mongo()
     print(f"   API Version: {API_VERSION}")
     print(f"   Prefix: {API_PREFIX}")
     
@@ -29,6 +31,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    await close_mongo_connection()
     print("👋 Shutting down Invoice Parser API...")
 
 
