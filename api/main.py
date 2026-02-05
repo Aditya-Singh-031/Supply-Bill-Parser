@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
 from api.core.redis_client import RedisClient
 from api.routes import invoice
-
+from api.routes import invoice, auth, users, dashboard  # <--- Add dashboard
 from api.core.database import connect_to_mongo, close_mongo_connection
 from api.routes import invoice, auth, users
 # Startup and shutdown events
@@ -54,9 +54,9 @@ app.add_middleware(
 
 # Include routers
 app.include_router(invoice.router, prefix=API_PREFIX + "/invoices", tags=["Invoices"])
-app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])      # <--- ADD THIS
-app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])    # <--- ADD THIS
-
+app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
+app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])
+app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"]) # <--- ADD THIS
 # Health check endpoint
 @app.get("/health")
 async def health_check():
