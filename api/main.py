@@ -7,20 +7,23 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
-from api.core.redis_client import RedisClient
-from api.routes import invoice
-from api.routes import invoice, auth, users, dashboard  # <--- Add dashboard
 from api.core.database import connect_to_mongo, close_mongo_connection
-from api.routes import invoice, auth, users
+from api.core.redis_client import RedisClient
+
+# --- 1. IMPORT THE NEW ROUTER HERE ---
+from api.routes import invoice, auth, users, dashboard
+
 # Startup and shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown"""
     # Startup
     print("🚀 Starting Invoice Parser API...")
-    await connect_to_mongo()
     print(f"   API Version: {API_VERSION}")
     print(f"   Prefix: {API_PREFIX}")
+    
+    # Connect to MongoDB
+    await connect_to_mongo()
     
     # Test Redis connection
     if RedisClient.ping():
@@ -52,11 +55,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# --- 2. REGISTER THE ROUTER HERE ---
 app.include_router(invoice.router, prefix=API_PREFIX + "/invoices", tags=["Invoices"])
 app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
 app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])
-app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"]) # <--- ADD THIS
+app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"])
+
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
