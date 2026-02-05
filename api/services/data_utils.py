@@ -11,10 +11,14 @@ from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
 
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
+    """
+    Saves extracted data to MongoDB.
+    """
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
     buyer = data.get("buyer", {})
     
+    # Date Handling
     raw_date = meta.get("invoice_date")
     final_date_str = None
     if raw_date:
@@ -48,26 +52,21 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
-        # --- KEY MAPPING FIX FOR DB SAVE ---
-        # Ensure we capture part number even if AI calls it something else
-        p_num = (
-            item.get("part_number") or 
-            item.get("part_no") or 
-            item.get("item_code") or 
-            item.get("sku") or 
-            ""
-        )
+        # Now we can just look for 'part_number' because we fixed the Schema!
+        # But we keep fallbacks just in case.
+        p_num = item.get("part_number") or item.get("parts_code") or item.get("part_no") or ""
+        hsn = item.get("hsn_code") or item.get("hsn") or ""
         
         li = LineItemCreate(
             invoice_id=uuid4(),
             sl_number=idx,
             part_number=str(p_num),
             description=str(item.get("description") or ""),
-            hsn_code=str(item.get("hsn_code") or item.get("hsn") or ""),
+            hsn_code=str(hsn),
             quantity=safe_float(item.get("quantity")),
             unit_price=safe_float(item.get("unit_price")),
             discount_percent=safe_float(item.get("discount_percent") or item.get("discount")),
-            igst_rate=safe_float(item.get("tax_rate") or item.get("igst_rate"))
+            igst_rate=safe_float(item.get("igst_rate") or item.get("tax_rate"))
         )
         line_items.append(li)
 
@@ -76,9 +75,7 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
 
 
 def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
-    """
-    Creates Excel. Aggressively checks for Part Number variations.
-    """
+    """Creates Excel."""
     flattened_data = []
 
     for invoice in data_list:
@@ -105,26 +102,15 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         for item in items:
             row = base_row.copy()
             
-            # --- AGGRESSIVE KEY CHECK ---
-            # Check every possible name for Part Number
-            p_num = (
-                item.get("part_number") or 
-                item.get("part_no") or 
-                item.get("item_code") or 
-                item.get("material_code") or 
-                item.get("sku") or 
-                item.get("product_id")
-            )
-            
+            p_num = item.get("part_number") or item.get("parts_code")
             hsn = item.get("hsn_code") or item.get("hsn")
-            desc = item.get("description") or item.get("item_description")
             
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             
             row.update({
                 "Part Number": p_num,
-                "Description": desc,
+                "Description": item.get("description"),
                 "HSN": hsn,
                 "Quantity": qty,
                 "Unit Price": price,
