@@ -1,59 +1,62 @@
+from typing import Any
+
+
 import os
 import json
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from api.core.database import get_database
 from api.core.config import BILLS_JSON_DIR
 
 router = APIRouter()
 
-@router.get("/stats")
-async def get_dashboard_stats():
-    db = get_database()
-    
-    # 1. Count Users (Real DB Count)
-    user_count = await db["users"].count_documents({})
-    
-    # 2. Count Invoices & Unique Suppliers (Scan JSON Files)
-    invoice_count = 0
-    unique_suppliers = set()
-    
+# ... keep existing /stats endpoint ...
+
+@router.get("/suppliers")
+async def get_suppliers():
+    """
+    Returns a list of all unique sellers found in the JSON files.
+    Includes full details for the frontend to display.
+    """
+    unique_sellers = {}
+
     try:
         if os.path.exists(BILLS_JSON_DIR):
-            # List all JSON files
             files = [f for f in os.listdir(BILLS_JSON_DIR) if f.endswith('.json')]
-            invoice_count = len(files)
             
-            # Read each file to find the supplier name
             for filename in files:
                 try:
                     file_path = os.path.join(BILLS_JSON_DIR, filename)
                     with open(file_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         
-                        # Check common keys for supplier name
-                        # (Adjust these keys if your JSON structure is different)
-                        supplier = (
-                            data.get("supplier_name") or 
-                            data.get("vendor_name") or 
-                            data.get("biller_name") or 
-                            data.get("sender_name")
-                        )
+                        # Extract nested seller info
+                        seller = data.get("seller", {})
+                        raw_name = seller.get("name")
                         
-                        if supplier:
-                            # Normalize string (trim spaces, lowercase) to avoid duplicates
-                            unique_suppliers.add(str(supplier).strip().title())
+                        if raw_name:
+                            # Normalize slightly to prevent exact duplicate entries with different spacing
+                            clean_name = str(raw_name).strip()
                             
+                            # We keep the 'best' version of the seller details (e.g. the one with the most info)
+                            # For now, we just overwrite or keep the first one found
+                            if clean_name not in unique_sellers:
+                                unique_sellers[clean_name] = {
+                                    "name": clean_name,
+                                    "address": seller.get("address", "N/A"),
+                                    "gstin": seller.get("gstin", seller.get("tax_id", "N/A")),
+                                    "email": seller.get("email", "N/A"),
+                                    "phone": seller.get("phone", "N/A"),
+                                    "invoice_count": 1
+                                }
+                            else:
+                                unique_sellers[clean_name]["invoice_count"] += 1
+                                
                 except Exception as e:
-                    print(f"⚠️ Skipping file {filename}: {e}")
+                    print(f"⚠️ Error reading {filename}: {e}")
                     continue
                     
     except Exception as e:
-        print(f"❌ Error scanning directory: {e}")
-        invoice_count = 0
+        print(f"❌ Error scanning suppliers: {e}")
 
-    return {
-        "users": user_count,
-        "invoices_parsed": invoice_count,
-        "suppliers": len(unique_suppliers),
-        "active_jobs": 0 
-    }
+    # Convert dict to list
+    return list(unique_sellers.values())
