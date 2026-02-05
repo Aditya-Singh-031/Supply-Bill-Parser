@@ -1,226 +1,275 @@
-"""
-Asynchronous invoice processing service with multiprocessing
-"""
-import uuid
+import os
 import asyncio
-from pathlib import Path
-from datetime import datetime
-from typing import List, Tuple
+import json
+import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
-import traceback
+from uuid import UUID, uuid4
+from datetime import datetime
+from typing import List
+from pathlib import Path
 
-from api.core.config import (
-    WORKER_PROCESSES, 
-    TEMP_UPLOAD_DIR,
-    BILLS_EXCEL_DIR,
-    JOB_TIMEOUT
+# --- IMPORTS ---
+from api.core.redis_client import RedisClient
+from api.core.database import get_database
+from api.services.database_service import DatabaseService
+from api.core.config import BILLS_EXCEL_DIR
+
+# Import Schemas
+from api.models.schemas import (
+    InvoiceCreate, LineItemCreate, BulkInvoiceCreate, ExtractionStatus
 )
-from api.core.redis_client import (
-    set_job_status,
-    get_job_status,
-    update_job_progress,
-    set_pdf_progress
-)
-from api.models.api_models import JobStatus, PDFStatus, PDFProgress
 
-# Import your existing pipeline functions
-from parser.pdf_parser import extract_invoice_content
-from parser.ai_extractor import extract_invoice_level1, extract_invoice_level2
-from parser.validator import validate_invoice
-from parser.json_to_excel import consolidate_invoices, format_excel
-from models.invoice_schema import Invoice
+# Import your existing Parser logic
+# (Ensure your parser folder has __init__.py exporting this function)
+try:
+    from parser import extract_and_validate_invoice
+except ImportError:
+    # Fallback for testing if parser isn't linked yet
+    print("⚠️ WARNING: Parser module not found. Using mock parser.")
+    def extract_and_validate_invoice(path):
+        return {"error": "Parser module missing"}
 
-
-def process_single_pdf_worker(args: Tuple[str, Path, int]) -> dict:
+# =========================================================
+# 1. WORKER FUNCTION (Runs in a Separate Process)
+# =========================================================
+def process_single_pdf_worker(args):
     """
-    Worker function to process a single PDF (runs in separate process)
-    
-    Args:
-        args: Tuple of (job_id, pdf_path, pdf_index)
-        
-    Returns:
-        Result dictionary with status and data
+    CPU-bound task: Parses the PDF and returns a Dictionary.
+    Does NOT connect to MongoDB.
     """
-    job_id, pdf_path, pdf_index = args
-    
-    result = {
-        "index": pdf_index,
-        "filename": pdf_path.name,
-        "status": PDFStatus.FAILED,
-        "error": None,
-        "line_items": 0,
-        "total_amount": 0.0
-    }
-    
+    job_id, file_path, index = args
+    filename = os.path.basename(file_path).split('_', 1)[1] # Remove job_id prefix
+
     try:
-        # Update status: Parsing
-        _update_pdf_status(job_id, pdf_index, PDFStatus.PARSING, 10, "Parsing PDF...")
-        invoice_content = extract_invoice_content(str(pdf_path))
+        # 1. Update Redis: Parsing Started
+        RedisClient.update_pdf_progress(job_id, str(index), "parsing", 10, "Extracting text...")
+
+        # 2. RUN AI EXTRACTION
+        print(f"   📄 Worker processing: {filename}")
+        result = extract_and_validate_invoice(file_path)
         
-        # Update status: Extracting
-        _update_pdf_status(job_id, pdf_index, PDFStatus.EXTRACTING, 40, "Extracting data...")
-        invoice = extract_invoice_level1(invoice_content, pdf_path.name)
+        # 3. Handle Errors
+        if not result or result.get("error"):
+            error_msg = result.get("error", "Unknown extraction error")
+            RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, f"Error: {error_msg}")
+            return {"success": False, "index": index, "filename": filename, "error": error_msg}
+
+        # 4. Update Redis: Extraction Success
+        line_items_count = len(result.get("line_items", []))
+        total_amt = result.get("total_amount", 0.0)
         
-        # Update status: Validating
-        _update_pdf_status(job_id, pdf_index, PDFStatus.VALIDATING, 70, "Validating...")
-        report = validate_invoice(invoice)
-        
-        if not report.passed:
-            # Level-2 correction needed
-            _update_pdf_status(job_id, pdf_index, PDFStatus.CORRECTING, 80, "Correcting errors...")
-            validation_text = report.to_prompt_text()
-            invoice = extract_invoice_level2(
-                invoice_content=invoice_content,
-                level1_invoice=invoice,
-                validation_report_text=validation_text,
-                source_file=pdf_path.name
-            )
-        
-        # Save JSON
-        from parser.config import BILLS_JSON_DIR
-        BILLS_JSON_DIR.mkdir(exist_ok=True)
-        json_path = BILLS_JSON_DIR / f"{pdf_path.stem}.json"
-        
-        with open(json_path, "w") as f:
-            f.write(invoice.model_dump_json(indent=2))
-        
-        # Update status: Completed
-        result.update({
-            "status": PDFStatus.COMPLETED,
-            "line_items": len(invoice.line_items),
-            "total_amount": float(invoice.totals.invoice_amount or 0),
-            "json_path": str(json_path)
-        })
-        
-        _update_pdf_status(
-            job_id, pdf_index, PDFStatus.COMPLETED, 100,
-            f"Complete: {len(invoice.line_items)} items, ₹{invoice.totals.invoice_amount:,.2f}",
-            line_items=len(invoice.line_items),
-            total_amount=float(invoice.totals.invoice_amount or 0)
+        RedisClient.update_pdf_progress(
+            job_id, 
+            str(index), 
+            "extracting", 
+            90, 
+            f"Extracted {line_items_count} items",
+            line_items=line_items_count,
+            total_amount=total_amt
         )
-        
-    except Exception as e:
-        error_msg = str(e)
-        result["error"] = error_msg
-        _update_pdf_status(job_id, pdf_index, PDFStatus.FAILED, 100, f"Error: {error_msg}")
-        print(f"Error processing {pdf_path.name}: {error_msg}")
-        traceback.print_exc()
-    
-    return result
 
-
-def _update_pdf_status(job_id: str, pdf_index: int, status: PDFStatus, progress: int, message: str, **kwargs):
-    """Helper to update PDF status in Redis"""
-    from api.core.redis_client import set_pdf_progress
-    
-    progress_data = {
-        "status": status.value,
-        "progress": progress,
-        "message": message,
-        "updated_at": datetime.utcnow().isoformat(),
-        **kwargs
-    }
-    
-    set_pdf_progress(job_id, pdf_index, progress_data)
-
-
-async def process_invoices_async(job_id: str, pdf_paths: List[Path]):
-    """
-    Process multiple invoices asynchronously with multiprocessing
-    
-    Args:
-        job_id: Unique job identifier
-        pdf_paths: List of PDF file paths
-    """
-    # Initialize job status
-    initial_status = {
-        "job_id": job_id,
-        "status": JobStatus.PROCESSING.value,
-        "total_files": len(pdf_paths),
-        "completed_files": 0,
-        "failed_files": 0,
-        "progress": 0,
-        "pdfs": {},
-        "excel_ready": False,
-        "started_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat()
-    }
-    
-    # Initialize PDF statuses
-    for idx, pdf_path in enumerate(pdf_paths):
-        initial_status["pdfs"][str(idx)] = {
-            "filename": pdf_path.name,
-            "status": PDFStatus.QUEUED.value,
-            "progress": 0,
-            "message": "Queued",
-            "started_at": None
+        return {
+            "success": True, 
+            "index": index, 
+            "filename": filename, 
+            "data": result,
+            "pdf_path": file_path
         }
-    
-    set_job_status(job_id, initial_status)
-    
-    try:
-        # Prepare arguments for workers
-        worker_args = [(job_id, pdf_path, idx) for idx, pdf_path in enumerate(pdf_paths)]
-        
-        # Process PDFs in parallel using ProcessPoolExecutor
-        loop = asyncio.get_event_loop()
-        with ProcessPoolExecutor(max_workers=WORKER_PROCESSES) as executor:
-            results = await loop.run_in_executor(
-                None,
-                lambda: list(executor.map(process_single_pdf_worker, worker_args, timeout=JOB_TIMEOUT))
-            )
-        
-        # Count successes and failures
-        completed = sum(1 for r in results if r["status"] == PDFStatus.COMPLETED)
-        failed = sum(1 for r in results if r["status"] == PDFStatus.FAILED)
-        
-        # Update job status
-        update_job_progress(job_id, {
-            "completed_files": completed,
-            "failed_files": failed,
-            "progress": 90,
-            "updated_at": datetime.utcnow().isoformat()
-        })
-        
-        # Generate consolidated Excel
-        print(f"Generating consolidated Excel for job {job_id}...")
-        excel_filename = f"invoices_{job_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        excel_path = BILLS_EXCEL_DIR / excel_filename
-        
-        # Use existing consolidation logic
-        from parser.json_to_excel import consolidate_invoices as consolidate_fn
-        df, processed_files = consolidate_fn()
-        
-        if not df.empty:
-            from parser.json_to_excel import format_excel
-            format_excel(df, excel_path)
-            
-            # Calculate totals
-            total_line_items = len(df)
-            
-            # Mark as completed
-            update_job_progress(job_id, {
-                "status": JobStatus.COMPLETED.value,
-                "progress": 100,
-                "excel_ready": True,
-                "excel_filename": excel_filename,
-                "excel_path": str(excel_path),
-                "total_line_items": total_line_items,
-                "completed_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat()
-            })
-            
-            print(f"✅ Job {job_id} completed successfully!")
-        else:
-            raise Exception("No data to consolidate")
-            
+
     except Exception as e:
-        error_msg = f"Job failed: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
+        error_str = str(e)
+        print(f"❌ Worker Error on {filename}: {error_str}")
+        RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, "Processing Failed")
+        return {"success": False, "index": index, "filename": filename, "error": error_str}
+
+
+# =========================================================
+# 2. MAIN ASYNC CONTROLLER (Runs in Main Thread)
+# =========================================================
+async def process_invoices_background(job_id: str, file_paths: List[str]):
+    """
+    Orchestrates workers and saves results to MongoDB asynchronously.
+    """
+    print(f"🚀 Starting background job {job_id} for {len(file_paths)} files")
+    
+    # Initialize DB Service
+    db = get_database()
+    db_service = DatabaseService(db)
+
+    # Prepare arguments for workers
+    worker_args = [(job_id, path, idx) for idx, path in enumerate(file_paths)]
+    
+    # --- A. RUN PARALLEL PARSING ---
+    loop = asyncio.get_running_loop()
+    # Limit max workers to avoid crashing the server (4 is safe for local)
+    max_workers = min(4, len(file_paths))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            loop.run_in_executor(executor, process_single_pdf_worker, arg) 
+            for arg in worker_args
+        ]
+        results = await asyncio.gather(*futures)
+
+    # --- B. SAVE TO MONGODB (ASYNC) ---
+    successful_count = 0
+    failed_count = 0
+    valid_results_for_excel = []
+
+    for res in results:
+        index = str(res["index"])
         
-        update_job_progress(job_id, {
-            "status": JobStatus.FAILED.value,
-            "error": error_msg,
-            "updated_at": datetime.utcnow().isoformat()
-        })
+        if res["success"]:
+            try:
+                # Save to DB
+                await _save_to_mongo(db_service, UUID(job_id), res["filename"], res["data"])
+                
+                # Update Redis: Completed
+                RedisClient.update_pdf_progress(job_id, index, "completed", 100, "Saved to Database")
+                successful_count += 1
+                
+                # Add metadata for Excel generation
+                excel_data = res["data"].copy()
+                excel_data["filename"] = res["filename"]
+                valid_results_for_excel.append(excel_data)
+                
+            except Exception as e:
+                print(f"❌ DB Save Error for {res['filename']}: {e}")
+                RedisClient.update_pdf_progress(job_id, index, "failed", 100, "Database Save Failed")
+                failed_count += 1
+        else:
+            failed_count += 1
+
+    # --- C. GENERATE EXCEL ---
+    excel_path = None
+    if valid_results_for_excel:
+        try:
+            excel_path = _generate_consolidated_excel(job_id, valid_results_for_excel)
+        except Exception as e:
+            print(f"❌ Excel Generation Error: {e}")
+
+    # --- D. FINALIZE JOB ---
+    final_status = "completed" if failed_count == 0 else ("completed" if successful_count > 0 else "failed")
+    
+    job_update = {
+        "status": final_status,
+        "completed_files": successful_count,
+        "failed_files": failed_count,
+        "progress": 100,
+        "completed_at": datetime.utcnow().isoformat(),
+        "excel_ready": bool(excel_path),
+        "excel_path": excel_path,
+        "excel_filename": os.path.basename(excel_path) if excel_path else None
+    }
+    
+    # Merge with existing data to keep start time etc.
+    current_job = RedisClient.get_job(job_id) or {}
+    current_job.update(job_update)
+    RedisClient.set_job(job_id, current_job)
+
+    # --- E. CLEANUP ---
+    for path in file_paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except:
+            pass
+    
+    print(f"🏁 Job {job_id} finished. Success: {successful_count}, Failed: {failed_count}")
+
+
+# =========================================================
+# 3. HELPER FUNCTIONS
+# =========================================================
+async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict):
+    """Maps dictionary data to Pydantic Schemas and saves to DB."""
+    
+    # 1. Create Invoice Object
+    # Be robust: use .get() for everything
+    invoice_create = InvoiceCreate(
+        job_id=job_id,
+        invoice_number=str(data.get("invoice_number", "UNKNOWN")),
+        invoice_date=None, # You can add date parsing logic here if needed
+        vendor_name=data.get("vendor", {}).get("name") or data.get("vendor_name"),
+        vendor_gstin=data.get("vendor", {}).get("gstin") or data.get("vendor_gstin"),
+        buyer_name=data.get("buyer", {}).get("name") or data.get("buyer_name"),
+        buyer_gstin=data.get("buyer", {}).get("gstin") or data.get("buyer_gstin"),
+        total_quantity=0.0, # Will be updated by service
+        pdf_url=f"local://{filename}", # Placeholder
+        extraction_confidence=data.get("confidence", 0.95),
+        extraction_status=ExtractionStatus.COMPLETED
+    )
+
+    # 2. Create Line Item Objects
+    line_items = []
+    raw_items = data.get("line_items", [])
+    
+    for idx, item in enumerate(raw_items, 1):
+        # Ensure numeric values are floats
+        qty = item.get("quantity")
+        price = item.get("unit_price")
+        
+        try: qty = float(qty) if qty else 0.0
+        except: qty = 0.0
+            
+        try: price = float(price) if price else 0.0
+        except: price = 0.0
+
+        li = LineItemCreate(
+            invoice_id=uuid4(), # Temp ID
+            sl_number=idx,
+            part_number=item.get("part_number"),
+            description=item.get("description"),
+            hsn_code=item.get("hsn_code"),
+            quantity=qty,
+            unit_price=price,
+            igst_rate=None # Add if extracted
+        )
+        line_items.append(li)
+
+    # 3. Save via Bulk Service
+    bulk_payload = BulkInvoiceCreate(invoice=invoice_create, line_items=line_items)
+    await db_service.create_invoice_with_line_items(bulk_payload)
+
+
+def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
+    """Creates a flattened Excel file using Pandas."""
+    flattened_data = []
+
+    for invoice in data_list:
+        inv_num = invoice.get("invoice_number", "N/A")
+        vendor = invoice.get("vendor", {}).get("name") or invoice.get("vendor_name", "N/A")
+        
+        items = invoice.get("line_items", [])
+        if not items:
+            # Add a row even if no items
+            flattened_data.append({
+                "Filename": invoice.get("filename"),
+                "Invoice Number": inv_num,
+                "Vendor": vendor,
+                "Status": "No Items Found"
+            })
+        
+        for item in items:
+            flattened_data.append({
+                "Filename": invoice.get("filename"),
+                "Invoice Number": inv_num,
+                "Vendor": vendor,
+                "Part Number": item.get("part_number"),
+                "Description": item.get("description"),
+                "HSN": item.get("hsn_code"),
+                "Quantity": item.get("quantity"),
+                "Unit Price": item.get("unit_price"),
+                "Total": item.get("amount")
+            })
+
+    # Save to Excel
+    df = pd.DataFrame(flattened_data)
+    
+    # Ensure directory exists
+    os.makedirs(BILLS_EXCEL_DIR, exist_ok=True)
+    
+    output_path = os.path.join(BILLS_EXCEL_DIR, f"Consolidated_Invoices_{job_id}.xlsx")
+    df.to_excel(output_path, index=False)
+    
+    return output_path
