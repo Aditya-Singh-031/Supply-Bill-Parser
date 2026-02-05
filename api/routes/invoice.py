@@ -1,208 +1,182 @@
-"""
-Invoice processing API endpoints
-"""
-import uuid
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.responses import StreamingResponse, FileResponse
+from typing import List, Optional
+from uuid import UUID, uuid4
+import os
+import json
 import asyncio
-from pathlib import Path
-from typing import List
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
-from api.models.api_models import (
-    UploadResponse,
-    JobStatusResponse,
-    DownloadResponse,
-    ErrorResponse,
-    JobStatus,
-    PDFProgress
+from api.core.redis_client import RedisClient
+from api.core.database import get_database
+from api.services.database_service import DatabaseService
+from api.models.schemas import (
+    InvoiceResponse, InvoiceWithLineItems, InvoiceUpdate, 
+    LineItemResponse, LineItemUpdate, ExtractionStatus
 )
-from api.core.config import (
-    MAX_UPLOAD_SIZE,
-    MAX_FILES_PER_BATCH,
-    TEMP_UPLOAD_DIR,
-    BILLS_EXCEL_DIR
-)
-from api.core.redis_client import (
-    get_job_status,
-    delete_job_status
-)
-from api.services.processor import process_invoices_async
 
+# We will create this in the next step (Step 5)
+from api.services.processor import process_invoices_background
 
-router = APIRouter(prefix="/invoices", tags=["invoices"])
+router = APIRouter()
 
+# Dependency to get database service
+def get_db_service():
+    db = get_database()
+    return DatabaseService(db)
 
-@router.post("/upload", response_model=UploadResponse)
+# ============================================
+# 1. UPLOAD & PROCESSING
+# ============================================
+@router.post("/upload")
 async def upload_invoices(
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...)
 ):
     """
-    Upload multiple PDF invoices for processing
-    
-    - Accepts up to 20 PDF files
-    - Returns job_id for tracking progress
-    - Processing happens in background
+    Upload multiple invoice PDFs.
+    Saves to disk and starts background processing.
     """
-    # Validate file count
-    if len(files) > MAX_FILES_PER_BATCH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Maximum {MAX_FILES_PER_BATCH} files allowed per batch"
-        )
-    
-    if len(files) == 0:
+    if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     
-    # Validate file types and sizes
-    pdf_files = []
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 files allowed")
+
+    # Generate job ID
+    job_id = str(uuid4())
+    
+    # Save files temporarily
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    file_paths = []
     for file in files:
         if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Only PDF files allowed. Invalid: {file.filename}"
-            )
-        
-        # Check file size (read first chunk to estimate)
-        content = await file.read()
-        if len(content) > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File {file.filename} exceeds maximum size of 100MB"
-            )
-        
-        pdf_files.append((file.filename, content))
-    
-    # Generate unique job ID
-    job_id = str(uuid.uuid4())
-    job_dir = TEMP_UPLOAD_DIR / job_id
-    job_dir.mkdir(exist_ok=True)
-    
-    # Save uploaded files
-    pdf_paths = []
-    for filename, content in pdf_files:
-        file_path = job_dir / filename
-        with open(file_path, 'wb') as f:
+             continue
+             
+        file_path = os.path.join(temp_dir, f"{job_id}_{file.filename}")
+        with open(file_path, "wb") as f:
+            content = await file.read()
             f.write(content)
-        pdf_paths.append(file_path)
-    
-    # Estimate processing time (15 seconds per PDF)
-    estimated_time = len(pdf_paths) * 15
-    
-    # Start background processing
-    background_tasks.add_task(process_invoices_async, job_id, pdf_paths)
-    
-    return UploadResponse(
-        job_id=job_id,
-        message=f"Processing started for {len(pdf_paths)} invoices",
-        total_files=len(pdf_paths),
-        estimated_time=estimated_time
-    )
+        file_paths.append(file_path)
 
+    if not file_paths:
+        raise HTTPException(status_code=400, detail="No valid PDF files found")
+
+    # Initialize Redis Job
+    job_data = {
+        "job_id": job_id,
+        "status": "processing",
+        "total_files": len(file_paths),
+        "completed_files": 0,
+        "failed_files": 0,
+        "progress": 0,
+        "pdfs": {},
+        "started_at": datetime.utcnow().isoformat()
+    }
+    
+    for idx, path in enumerate(file_paths):
+        job_data["pdfs"][str(idx)] = {
+            "filename": os.path.basename(path).split('_', 1)[1], # Remove job_id prefix
+            "status": "queued",
+            "progress": 0,
+            "message": "In queue..."
+        }
+    
+    RedisClient.set_job(job_id, job_data)
+
+    # Start Background Processing (Fire and Forget)
+    # We pass just the ID and paths; the processor will open its own DB connection
+    asyncio.create_task(process_invoices_background(job_id, file_paths))
+
+    return {
+        "job_id": job_id,
+        "message": f"Processing started for {len(file_paths)} invoices",
+        "total_files": len(file_paths)
+    }
 
 @router.get("/status/{job_id}")
-async def get_status_sse(job_id: str):
-    """
-    Get real-time job status via Server-Sent Events (SSE)
-    
-    - Streams progress updates
-    - Client receives updates as they happen
-    - Connection stays open until job completes
-    """
-    async def event_generator():
-        """Generate SSE events"""
+async def get_job_status(job_id: str):
+    """Server-Sent Events for real-time progress"""
+    async def event_stream():
         last_update = None
-        
         while True:
-            status = get_job_status(job_id)
+            job_data = RedisClient.get_job(job_id)
             
-            if not status:
-                yield {
-                    "event": "error",
-                    "data": '{"error": "Job not found"}'
-                }
+            if not job_data:
+                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'})}\n\n"
                 break
             
-            # Only send if status changed
-            current_update = status.get("updated_at")
-            if current_update != last_update:
-                yield {
-                    "event": "progress",
-                    "data": str(status).replace("'", '"')  # Convert to JSON
-                }
-                last_update = current_update
+            # Only send data if it changed
+            if job_data != last_update:
+                yield f"event: progress\ndata: {json.dumps(job_data)}\n\n"
+                last_update = job_data
             
-            # Check if job is complete or failed
-            job_status = status.get("status")
-            if job_status in [JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value]:
-                yield {
-                    "event": "complete",
-                    "data": str(status).replace("'", '"')
-                }
+            if job_data.get("status") in ["completed", "failed"]:
+                yield f"event: complete\ndata: {json.dumps(job_data)}\n\n"
                 break
             
-            # Wait before next update
-            await asyncio.sleep(0.5)
-    
-    return EventSourceResponse(event_generator())
+            await asyncio.sleep(2)
 
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @router.get("/download/{job_id}")
 async def download_excel(job_id: str):
-    """
-    Download consolidated Excel file for completed job
-    
-    - Returns Excel file
-    - File contains all processed invoices
-    """
-    status = get_job_status(job_id)
-    
-    if not status:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    if status.get("status") != JobStatus.COMPLETED.value:
-        raise HTTPException(status_code=400, detail="Job not completed yet")
-    
-    if not status.get("excel_ready"):
-        raise HTTPException(status_code=404, detail="Excel file not ready")
-    
-    excel_filename = status.get("excel_filename")
-    excel_path = BILLS_EXCEL_DIR / excel_filename
-    
-    if not excel_path.exists():
-        raise HTTPException(status_code=404, detail="Excel file not found")
-    
+    """Download Excel for completed job"""
+    job_data = RedisClient.get_job(job_id)
+    if not job_data or job_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Job not ready")
+        
+    excel_path = job_data.get("excel_path")
+    if not excel_path or not os.path.exists(excel_path):
+        raise HTTPException(status_code=404, detail="File not found")
+        
     return FileResponse(
-        path=excel_path,
-        filename=excel_filename,
+        excel_path, 
+        filename=job_data.get("excel_filename", "invoices.xlsx"),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+# ============================================
+# 2. INVOICE CRUD (MongoDB)
+# ============================================
+@router.get("/", response_model=List[InvoiceResponse])
+async def list_invoices(
+    skip: int = 0, 
+    limit: int = 50, 
+    status: Optional[ExtractionStatus] = None,
+    db_service: DatabaseService = Depends(get_db_service)
+):
+    return await db_service.list_invoices(skip, limit, status)
 
-@router.delete("/cancel/{job_id}")
-async def cancel_job(job_id: str):
-    """
-    Cancel a running job
-    
-    - Stops processing
-    - Cleans up resources
-    """
-    status = get_job_status(job_id)
-    
-    if not status:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    if status.get("status") in [JobStatus.COMPLETED.value, JobStatus.FAILED.value]:
-        raise HTTPException(status_code=400, detail="Job already finished")
-    
-    # Update status to cancelled
-    from api.core.redis_client import update_job_progress
-    update_job_progress(job_id, {
-        "status": JobStatus.CANCELLED.value,
-        "updated_at": datetime.utcnow().isoformat()
-    })
-    
-    return {"message": "Job cancelled successfully", "job_id": job_id}
+@router.get("/{invoice_id}", response_model=InvoiceWithLineItems)
+async def get_invoice(
+    invoice_id: UUID,
+    db_service: DatabaseService = Depends(get_db_service)
+):
+    invoice = await db_service.get_invoice_with_line_items(invoice_id)
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return invoice
 
+@router.patch("/{invoice_id}", response_model=InvoiceResponse)
+async def update_invoice(
+    invoice_id: UUID,
+    update_data: InvoiceUpdate,
+    db_service: DatabaseService = Depends(get_db_service)
+):
+    # In production, get real user from Auth token
+    result = await db_service.update_invoice(invoice_id, update_data, updated_by="admin")
+    if not result:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return result
+
+@router.delete("/{invoice_id}")
+async def delete_invoice(
+    invoice_id: UUID,
+    db_service: DatabaseService = Depends(get_db_service)
+):
+    success = await db_service.delete_invoice(invoice_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return {"message": "Deleted successfully"}
