@@ -1,26 +1,22 @@
-Field Name,Description,Data Type,Example,Constraints,Business Purpose
-invoice_id,Unique invoice identifier,UUID,550e8400-e29b-41d4-a716-446655440000,Primary Key | Indexed,Unique identification
-job_id,Processing job ID from upload,UUID,16bdb9d1-1883-4b08-b488-97c17329c975,Foreign Key to jobs,Link to processing batch
-invoice_number,Invoice number from PDF,String,IFY26PUN009887,Indexed,Business reference
-invoice_date,Date on the invoice,Date,2026-01-15,,Payment tracking
-vendor_name,Supplier/vendor name,String,ABC Suppliers Pvt Ltd,Indexed,Vendor analysis
-vendor_gstin,Vendor's GST number,String,27AABCU9603R1ZM,Optional,Tax compliance
-buyer_name,Buyer/customer name,String,Morsebiz India Pvt Ltd,,Verify correct buyer
-buyer_gstin,Buyer's GST number,String,24AABCU9603R1ZX,Optional,Tax compliance
-po_number,Purchase Order reference,String,PO/2025/001234,Optional,Link to PO system
-total_amount,Grand total from invoice,Float,1950025.00,,Financial verification
-tax_amount,Total tax (GST/VAT),Float,234003.00,,Tax reconciliation
-currency,Invoice currency,String,INR,Default INR,Multi-currency support
-total_line_items,Count of line items,Integer,88,,Data integrity check
-pdf_filename,Original PDF file name,String,IFY26PUN009887.pdf,,Document tracing
-pdf_url,URL/path to PDF,String,/storage/pdfs/16bd...,S3 or local path,Document access
-extraction_status,Processing status,Enum,completed,"queued, processing, completed, failed",Workflow management
-extraction_confidence,AI confidence score,Float,0.95,0 to 1,Quality control
-error_flag,Whether extraction had errors,Boolean,false,,Issue tracking
-error_details,Error description if any,String,null,Null if no errors,Debugging
-verified_by,Username who verified,String,null,Null if unverified,Audit trail
-verified_at,Verification timestamp,Timestamp,null,Null if unverified,Audit trail
-comments,Any business comments,String,Partial delivery,Optional,Business notes
-created_at,Record creation time,Timestamp,2026-02-03T19:07:57Z,Auto-generated,Audit trail
-last_updated_at,Last modification time,Timestamp,2026-02-03T19:11:28Z,Auto-updated,Audit trail
-last_updated_by,Who last modified,String,akash.sharma,,Audit trail
+Field Name,Description,Data Type,Example,Notes
+invoice_id,Unique invoice identifier,UUID,550e8400-e29b-41d4-a716-446655440000,Primary key
+job_id,Processing job reference,UUID,16bdb9d1-1883-4b08-b488-97c17329c975,Links to job
+invoice_number,Invoice number from PDF,String,IFY26PUN009887,AI extracted
+invoice_date,Date on invoice,Date,2026-01-15,AI extracted
+vendor_name,Supplier/vendor name,String,ABC Suppliers Pvt Ltd,AI extracted
+vendor_gstin,Vendor GST number,String,27AABCU9603R1ZM,Optional
+buyer_name,Buyer/customer name,String,Morsebiz India Pvt Ltd,AI extracted
+buyer_gstin,Buyer GST number,String,24AABCU9603R1ZX,Optional
+po_number,Purchase Order reference,String,PO/2025/001234,Optional
+total_quantity,Sum of all item quantities,Float,450.5,Sum from line items
+pdf_url,Path to stored PDF,String,/storage/pdfs/job123/inv1.pdf,S3 or local
+extraction_status,Processing status,Enum,completed,"queued, processing, completed, failed"
+extraction_confidence,AI confidence score (0-1),Float,0.95,Overall quality
+error_flag,Has extraction errors,Boolean,false,True if issues
+error_details,Error description,String,null,What failed
+verified_by,Username who verified,String,null,Manual verification
+verified_at,Verification timestamp,Timestamp,null,When verified
+comments,Business notes,String,Partial delivery,User comments
+created_at,Record creation time,Timestamp,2026-02-03T19:07:57Z,Auto-generated
+last_updated_at,Last modification time,Timestamp,2026-02-03T19:11:28Z,Auto-updated
+last_updated_by,Who last modified,String,akash.sharma,Editor username
