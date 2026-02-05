@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import pandas as pd
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -19,43 +20,39 @@ from api.models.schemas import (
     InvoiceCreate, LineItemCreate, BulkInvoiceCreate, ExtractionStatus
 )
 
-# Import your existing Parser logic
-# (Ensure your parser folder has __init__.py exporting this function)
-# ... (imports stay the same) ...
-
-# Import your existing Parser logic
-# Import your existing Parser logic
+# =========================================================
+# 1. PARSER WRAPPER (Handles Import & Execution)
+# =========================================================
 try:
-    # 1. Try to import the level1 extractor directly
+    # Try to import the level1 extractor directly
     from parser.ai_extractor import extract_invoice_level1
     
-    # 2. Create a SMART wrapper to handle different return types
     def extract_and_validate_invoice(file_path):
         filename = os.path.basename(file_path)
         try:
+            # Open file as bytes
             with open(file_path, 'rb') as f:
                 content = f.read()
             
             # Call your existing function
             raw_result = extract_invoice_level1(content, filename)
             
-            # --- TYPE CONVERSION LOGIC ---
-            # Case A: It's a Pydantic v2 Model
+            # --- CRITICAL FIX: CONVERT RESULT TO DICT ---
+            # If it's a Pydantic Model (v1 or v2), convert to dict
             if hasattr(raw_result, "model_dump"):
                 return raw_result.model_dump()
-            # Case B: It's a Pydantic v1 Model
             elif hasattr(raw_result, "dict"):
                 return raw_result.dict()
-            # Case C: It's already a Dictionary
+            # If it's already a dict, return it
             elif isinstance(raw_result, dict):
                 return raw_result
-            # Case D: It's something else (like bytes/str) -> Error
+            # If it's bytes/str (the error source), fail gracefully
             else:
-                print(f"⚠️ Parser returned unexpected type: {type(raw_result)}")
                 return {"error": f"Parser returned invalid format: {type(raw_result)}"}
                 
         except Exception as e:
-            print(f"❌ Extraction Exception: {e}")
+            print(f"❌ Extraction Exception on {filename}:")
+            traceback.print_exc() 
             return {"error": str(e)}
 
 except ImportError as e:
@@ -63,18 +60,16 @@ except ImportError as e:
     def extract_and_validate_invoice(path):
         return {"error": "Parser module missing or import failed"}
 
-# ... (rest of the file stays the same) ...
 
 # =========================================================
-# 1. WORKER FUNCTION (Runs in a Separate Process)
+# 2. WORKER FUNCTION (Runs in a Separate Process)
 # =========================================================
 def process_single_pdf_worker(args):
     """
     CPU-bound task: Parses the PDF and returns a Dictionary.
-    Does NOT connect to MongoDB.
     """
     job_id, file_path, index = args
-    filename = os.path.basename(file_path).split('_', 1)[1] # Remove job_id prefix
+    filename = os.path.basename(file_path).split('_', 1)[1]
 
     try:
         # 1. Update Redis: Parsing Started
@@ -84,13 +79,13 @@ def process_single_pdf_worker(args):
         print(f"   📄 Worker processing: {filename}")
         result = extract_and_validate_invoice(file_path)
         
-        # 3. Handle Errors
-        if not result or result.get("error"):
-            error_msg = result.get("error", "Unknown extraction error")
+        # 3. Check for Errors (Safe Check)
+        if not result or (isinstance(result, dict) and result.get("error")):
+            error_msg = result.get("error") if isinstance(result, dict) else "Unknown error"
             RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, f"Error: {error_msg}")
             return {"success": False, "index": index, "filename": filename, "error": error_msg}
 
-        # 4. Update Redis: Extraction Success
+        # 4. Success
         line_items_count = len(result.get("line_items", []))
         total_amt = result.get("total_amount", 0.0)
         
@@ -115,12 +110,13 @@ def process_single_pdf_worker(args):
     except Exception as e:
         error_str = str(e)
         print(f"❌ Worker Error on {filename}: {error_str}")
+        traceback.print_exc()
         RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, "Processing Failed")
         return {"success": False, "index": index, "filename": filename, "error": error_str}
 
 
 # =========================================================
-# 2. MAIN ASYNC CONTROLLER (Runs in Main Thread)
+# 3. MAIN ASYNC CONTROLLER (Runs in Main Thread)
 # =========================================================
 async def process_invoices_background(job_id: str, file_paths: List[str]):
     """
@@ -137,7 +133,6 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
     
     # --- A. RUN PARALLEL PARSING ---
     loop = asyncio.get_running_loop()
-    # Limit max workers to avoid crashing the server (4 is safe for local)
     max_workers = min(4, len(file_paths))
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -171,6 +166,7 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                 
             except Exception as e:
                 print(f"❌ DB Save Error for {res['filename']}: {e}")
+                traceback.print_exc()
                 RedisClient.update_pdf_progress(job_id, index, "failed", 100, "Database Save Failed")
                 failed_count += 1
         else:
@@ -215,23 +211,22 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
 
 
 # =========================================================
-# 3. HELPER FUNCTIONS
+# 4. HELPER FUNCTIONS
 # =========================================================
 async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict):
     """Maps dictionary data to Pydantic Schemas and saves to DB."""
     
     # 1. Create Invoice Object
-    # Be robust: use .get() for everything
     invoice_create = InvoiceCreate(
         job_id=job_id,
         invoice_number=str(data.get("invoice_number", "UNKNOWN")),
-        invoice_date=None, # You can add date parsing logic here if needed
+        invoice_date=None, 
         vendor_name=data.get("vendor", {}).get("name") or data.get("vendor_name"),
         vendor_gstin=data.get("vendor", {}).get("gstin") or data.get("vendor_gstin"),
         buyer_name=data.get("buyer", {}).get("name") or data.get("buyer_name"),
         buyer_gstin=data.get("buyer", {}).get("gstin") or data.get("buyer_gstin"),
-        total_quantity=0.0, # Will be updated by service
-        pdf_url=f"local://{filename}", # Placeholder
+        total_quantity=0.0, 
+        pdf_url=f"local://{filename}", 
         extraction_confidence=data.get("confidence", 0.95),
         extraction_status=ExtractionStatus.COMPLETED
     )
@@ -241,25 +236,24 @@ async def _save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: st
     raw_items = data.get("line_items", [])
     
     for idx, item in enumerate(raw_items, 1):
-        # Ensure numeric values are floats
-        qty = item.get("quantity")
-        price = item.get("unit_price")
+        qty = item.get("quantity", 0.0) or 0.0
+        price = item.get("unit_price", 0.0) or 0.0
         
-        try: qty = float(qty) if qty else 0.0
+        # Safe float conversion
+        try: qty = float(qty)
         except: qty = 0.0
-            
-        try: price = float(price) if price else 0.0
+        try: price = float(price)
         except: price = 0.0
 
         li = LineItemCreate(
-            invoice_id=uuid4(), # Temp ID
+            invoice_id=uuid4(),
             sl_number=idx,
             part_number=item.get("part_number"),
             description=item.get("description"),
             hsn_code=item.get("hsn_code"),
             quantity=qty,
             unit_price=price,
-            igst_rate=None # Add if extracted
+            igst_rate=None 
         )
         line_items.append(li)
 
@@ -278,7 +272,6 @@ def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         
         items = invoice.get("line_items", [])
         if not items:
-            # Add a row even if no items
             flattened_data.append({
                 "Filename": invoice.get("filename"),
                 "Invoice Number": inv_num,
@@ -301,10 +294,7 @@ def _generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
 
     # Save to Excel
     df = pd.DataFrame(flattened_data)
-    
-    # Ensure directory exists
     os.makedirs(BILLS_EXCEL_DIR, exist_ok=True)
-    
     output_path = os.path.join(BILLS_EXCEL_DIR, f"Consolidated_Invoices_{job_id}.xlsx")
     df.to_excel(output_path, index=False)
     
