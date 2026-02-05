@@ -65,7 +65,7 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(invoice.router, prefix=API_PREFIX)
+app.include_router(invoice.router, prefix=API_PREFIX + "/invoices")
 
 
 # Health check endpoint

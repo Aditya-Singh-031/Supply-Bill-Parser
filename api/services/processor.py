@@ -21,13 +21,30 @@ from api.models.schemas import (
 
 # Import your existing Parser logic
 # (Ensure your parser folder has __init__.py exporting this function)
+# ... (imports stay the same) ...
+
+# Import your existing Parser logic
 try:
-    from parser import extract_and_validate_invoice
-except ImportError:
-    # Fallback for testing if parser isn't linked yet
-    print("⚠️ WARNING: Parser module not found. Using mock parser.")
+    # 1. Try to import the level1 extractor directly
+    from parser.ai_extractor import extract_invoice_level1
+    
+    # 2. Create a wrapper to make it compatible with our processor
+    def extract_and_validate_invoice(file_path):
+        filename = os.path.basename(file_path)
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        
+        # Call your existing function
+        # Note: We assume it returns the dictionary of extracted data
+        return extract_invoice_level1(content, filename)
+        
+except ImportError as e:
+    # Fallback for debugging if import fails
+    print(f"⚠️ WARNING: Could not import parser.ai_extractor: {e}")
     def extract_and_validate_invoice(path):
-        return {"error": "Parser module missing"}
+        return {"error": "Parser module missing or import failed"}
+
+# ... (rest of the file stays the same) ...
 
 # =========================================================
 # 1. WORKER FUNCTION (Runs in a Separate Process)
