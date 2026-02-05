@@ -1,107 +1,101 @@
-"""
-Redis client for job queue and progress tracking
-"""
+import os
 import json
 import redis
-from typing import Optional, Dict, Any
-from api.core.config import REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD
+from datetime import datetime
 
+# Get Redis Config
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
 class RedisClient:
-    """Redis client singleton"""
-    
-    _instance: Optional[redis.Redis] = None
-    
+    _client = None
+
     @classmethod
-    def get_instance(cls) -> redis.Redis:
-        """Get Redis instance (singleton pattern)"""
-        if cls._instance is None:
-            cls._instance = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                password=REDIS_PASSWORD,
-                decode_responses=True,
-                socket_connect_timeout=5
-            )
-        return cls._instance
-    
+    def get_client(cls):
+        """Singleton pattern for Redis connection"""
+        if cls._client is None:
+            try:
+                cls._client = redis.Redis(
+                    host=REDIS_HOST,
+                    port=REDIS_PORT,
+                    db=REDIS_DB,
+                    password=REDIS_PASSWORD,
+                    decode_responses=True
+                )
+                cls._client.ping() # Test connection
+            except Exception as e:
+                print(f"⚠️ Redis connection failed: {e}")
+                return None
+        return cls._client
+
     @classmethod
-    def ping(cls) -> bool:
-        """Check if Redis is accessible"""
-        try:
-            return cls.get_instance().ping()
-        except Exception:
-            return False
+    def ping(cls):
+        """Test connection"""
+        client = cls.get_client()
+        if client:
+            try:
+                return client.ping()
+            except:
+                return False
+        return False
 
+    @classmethod
+    def set_job(cls, job_id: str, data: dict, ttl: int = 86400):
+        """Save job data to Redis (JSON serialized)"""
+        client = cls.get_client()
+        if client:
+            client.setex(f"job:{job_id}", ttl, json.dumps(data))
 
-def set_job_status(job_id: str, status: Dict[str, Any], expire: int = 86400):
-    """
-    Set job status in Redis
-    
-    Args:
-        job_id: Unique job identifier
-        status: Status dictionary
-        expire: Expiration time in seconds (default 24 hours)
-    """
-    redis_client = RedisClient.get_instance()
-    key = f"job:{job_id}"
-    redis_client.setex(key, expire, json.dumps(status))
+    @classmethod
+    def get_job(cls, job_id: str):
+        """Retrieve job data from Redis"""
+        client = cls.get_client()
+        if client:
+            data = client.get(f"job:{job_id}")
+            return json.loads(data) if data else None
+        return None
 
-
-def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Get job status from Redis
-    
-    Args:
-        job_id: Unique job identifier
+    @classmethod
+    def update_pdf_progress(cls, job_id, pdf_index, status, progress, message, line_items=0, total_amount=0.0):
+        """Atomic update for a specific PDF within a job"""
+        # Note: In a high-concurrency production env, use Lua scripts or HSET.
+        # For this scale, GET -> UPDATE -> SET is acceptable.
         
-    Returns:
-        Status dictionary or None if not found
-    """
-    redis_client = RedisClient.get_instance()
-    key = f"job:{job_id}"
-    data = redis_client.get(key)
-    
-    if data:
-        return json.loads(data)
-    return None
+        job_data = cls.get_job(job_id)
+        if not job_data:
+            return
 
+        # Update specific PDF
+        if str(pdf_index) in job_data["pdfs"]:
+            job_data["pdfs"][str(pdf_index)].update({
+                "status": status,
+                "progress": progress,
+                "message": message,
+                "updated_at": datetime.utcnow().isoformat()
+            })
+            
+            # Store extracted stats if available
+            if status == "completed":
+                job_data["pdfs"][str(pdf_index)]["line_items"] = line_items
+                job_data["pdfs"][str(pdf_index)]["total_amount"] = total_amount
 
-def update_job_progress(job_id: str, updates: Dict[str, Any]):
-    """
-    Update job progress fields
-    
-    Args:
-        job_id: Unique job identifier
-        updates: Dictionary of fields to update
-    """
-    status = get_job_status(job_id)
-    if status:
-        status.update(updates)
-        set_job_status(job_id, status)
-
-
-def delete_job_status(job_id: str):
-    """Delete job status from Redis"""
-    redis_client = RedisClient.get_instance()
-    key = f"job:{job_id}"
-    redis_client.delete(key)
-
-
-def set_pdf_progress(job_id: str, pdf_index: int, progress_data: Dict[str, Any]):
-    """
-    Set progress for individual PDF
-    
-    Args:
-        job_id: Job identifier
-        pdf_index: Index of PDF in batch
-        progress_data: Progress information
-    """
-    status = get_job_status(job_id)
-    if status:
-        if "pdfs" not in status:
-            status["pdfs"] = {}
+        # Update Overall Job Progress
+        total_files = job_data["total_files"]
+        pdfs = job_data["pdfs"].values()
+        completed = sum(1 for p in pdfs if p["status"] == "completed")
+        failed = sum(1 for p in pdfs if p["status"] == "failed")
         
-        status["pdfs"][str(pdf_index)] = progress_data
-        set_job_status(job_id, status)
+        # Calculate overall percentage (simple average of individual progress)
+        total_progress = sum(p["progress"] for p in pdfs)
+        overall_progress = int(total_progress / total_files) if total_files > 0 else 0
+
+        job_data.update({
+            "completed_files": completed,
+            "failed_files": failed,
+            "progress": overall_progress,
+            "updated_at": datetime.utcnow().isoformat()
+        })
+
+        cls.set_job(job_id, job_data)

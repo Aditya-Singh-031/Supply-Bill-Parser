@@ -24,22 +24,41 @@ from api.models.schemas import (
 # ... (imports stay the same) ...
 
 # Import your existing Parser logic
+# Import your existing Parser logic
 try:
     # 1. Try to import the level1 extractor directly
     from parser.ai_extractor import extract_invoice_level1
     
-    # 2. Create a wrapper to make it compatible with our processor
+    # 2. Create a SMART wrapper to handle different return types
     def extract_and_validate_invoice(file_path):
         filename = os.path.basename(file_path)
-        with open(file_path, 'rb') as f:
-            content = f.read()
-        
-        # Call your existing function
-        # Note: We assume it returns the dictionary of extracted data
-        return extract_invoice_level1(content, filename)
-        
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            # Call your existing function
+            raw_result = extract_invoice_level1(content, filename)
+            
+            # --- TYPE CONVERSION LOGIC ---
+            # Case A: It's a Pydantic v2 Model
+            if hasattr(raw_result, "model_dump"):
+                return raw_result.model_dump()
+            # Case B: It's a Pydantic v1 Model
+            elif hasattr(raw_result, "dict"):
+                return raw_result.dict()
+            # Case C: It's already a Dictionary
+            elif isinstance(raw_result, dict):
+                return raw_result
+            # Case D: It's something else (like bytes/str) -> Error
+            else:
+                print(f"⚠️ Parser returned unexpected type: {type(raw_result)}")
+                return {"error": f"Parser returned invalid format: {type(raw_result)}"}
+                
+        except Exception as e:
+            print(f"❌ Extraction Exception: {e}")
+            return {"error": str(e)}
+
 except ImportError as e:
-    # Fallback for debugging if import fails
     print(f"⚠️ WARNING: Could not import parser.ai_extractor: {e}")
     def extract_and_validate_invoice(path):
         return {"error": "Parser module missing or import failed"}
