@@ -8,9 +8,14 @@ from api.core.security import get_password_hash
 
 router = APIRouter()
 
-# Helper to fix MongoDB _id
+# Helper to normalize user doc for API response (id, snake_case, no secrets)
 def fix_id(user):
+    user = dict(user)
     user["id"] = str(user["_id"])
+    user["created_at"] = user.get("created_at") or user.get("createdAt")
+    user.pop("_id", None)
+    user.pop("password", None)
+    user.pop("hashed_password", None)
     return user
 
 # 1. GET ALL USERS
