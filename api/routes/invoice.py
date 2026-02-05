@@ -120,21 +120,45 @@ async def get_job_status(job_id: str):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+# ... inside api/routes/invoice.py
+
 @router.get("/download/{job_id}")
 async def download_excel(job_id: str):
-    """Download Excel for completed job"""
+    """
+    Download consolidated Excel file for a completed job
+    """
+    print(f"📥 Download Request for Job: {job_id}")
     job_data = RedisClient.get_job(job_id)
-    if not job_data or job_data.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="Job not ready")
+    
+    if not job_data:
+        print("   ❌ Job data not found in Redis")
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    print(f"   📊 Job Status: {job_data.get('status')}")
+    print(f"   📂 Excel Path in Redis: {job_data.get('excel_path')}")
+    
+    if job_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Job not completed yet")
         
     excel_path = job_data.get("excel_path")
-    if not excel_path or not os.path.exists(excel_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Check if path exists
+    if not excel_path:
+        print("   ❌ No excel_path in job data")
+        raise HTTPException(status_code=404, detail="Excel file generation failed")
         
+    if not os.path.exists(excel_path):
+        print(f"   ❌ File does not exist on disk at: {excel_path}")
+        # Try to find it relative to current directory as fallback
+        abs_path = os.path.abspath(excel_path)
+        print(f"   🔍 Checked absolute path: {abs_path}")
+        raise HTTPException(status_code=404, detail="Excel file missing from server storage")
+        
+    filename = job_data.get("excel_filename", f"invoices_{job_id}.xlsx")
     return FileResponse(
-        excel_path, 
-        filename=job_data.get("excel_filename", "invoices.xlsx"),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        excel_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename
     )
 
 # ============================================
