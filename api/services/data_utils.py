@@ -9,7 +9,7 @@ from api.models.schemas import (
 )
 from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
-
+from api.services.part_number_extractor import PartNumberExtractor
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
     """
     Saves extracted data to MongoDB.
@@ -52,21 +52,34 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
-        # Now we can just look for 'part_number' because we fixed the Schema!
-        # But we keep fallbacks just in case.
-        p_num = item.get("part_number") or item.get("parts_code") or item.get("part_no") or ""
-        hsn = item.get("hsn_code") or item.get("hsn") or ""
+        # --- PART NUMBER EXTRACTION LOGIC ---
+        # 1. Get what the AI found (checking all possible keys)
+        ai_part_no = (
+            item.get("part_number") or 
+            item.get("part_no") or 
+            item.get("item_code") or 
+            item.get("sku") or
+            item.get("parts_code")
+        )
         
+        description_text = str(item.get("description") or "")
+
+        # 2. CALL THE EXTRACTOR
+        # Takes the description and the AI's attempt. 
+        # If AI found nothing valid, it digs into the description using our new regex rules.
+        final_part_number = PartNumberExtractor.extract(description_text, ai_part_no)
+        # ------------------------------------
+
         li = LineItemCreate(
             invoice_id=uuid4(),
             sl_number=idx,
-            part_number=str(p_num),
-            description=str(item.get("description") or ""),
-            hsn_code=str(hsn),
+            part_number=str(final_part_number), # <--- Uses the robustly extracted result
+            description=description_text,
+            hsn_code=str(item.get("hsn_code") or item.get("hsn") or ""),
             quantity=safe_float(item.get("quantity")),
             unit_price=safe_float(item.get("unit_price")),
             discount_percent=safe_float(item.get("discount_percent") or item.get("discount")),
-            igst_rate=safe_float(item.get("igst_rate") or item.get("tax_rate"))
+            igst_rate=safe_float(item.get("tax_rate") or item.get("igst_rate"))
         )
         line_items.append(li)
 
