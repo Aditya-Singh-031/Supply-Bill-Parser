@@ -6,7 +6,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
+from datetime import datetime, timedelta
 from api.core.database import get_database
 from api.core.redis_client import RedisClient
 from api.core.config import BILLS_EXCEL_DIR
@@ -34,7 +34,15 @@ async def get_all_operations():
             job_keys = redis.keys("job:*")
             for key in job_keys:
                 job_data = json.loads(redis.get(key))
-                
+                # --- NEW: GHOST CHECK ---
+                # If job started > 1 hour ago and is not complete, ignore it
+                started_at = job_data.get("started_at")
+                if started_at:
+                    try:
+                        start_dt = datetime.fromisoformat(started_at)
+                        if datetime.utcnow() - start_dt > timedelta(hours=1):
+                            continue # Skip stale job
+                    except: pass
                 # We only care about jobs that are NOT fully complete yet
                 # or strictly, we look at individual files inside the job
                 pdfs = job_data.get("pdfs", {})
