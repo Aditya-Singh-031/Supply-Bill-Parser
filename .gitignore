@@ -226,3 +226,4 @@ data_samples/*.pdf
 Thumbs.db
 /temp_uploads
 *.xlsx
+/storage
