@@ -18,6 +18,9 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
 
+      - name: Create .env file
+        run: echo "${{ secrets.ENV_FILE }}" > .env
+
       - name: Deploy to VPS
         run: |
           ssh -o StrictHostKeyChecking=no azureuser@74.225.254.175 "mkdir -p /home/azureuser/projects/supply-bill-parser"
@@ -27,7 +30,6 @@ jobs:
             --exclude='.github' \
             --exclude='node_modules' \
             --exclude='__pycache__' \
-            --exclude='.env' \
             --exclude='storage' \
             --exclude='logs' \
             ./ azureuser@74.225.254.175:/home/azureuser/projects/supply-bill-parser/
@@ -35,15 +37,6 @@ jobs:
           ssh -o StrictHostKeyChecking=no azureuser@74.225.254.175 << 'EOF'
             cd /home/azureuser/projects/supply-bill-parser
             
-            # Ensure .env exists
-            if [ ! -f .env ]; then
-              echo "Creating simplified .env..."
-              # In a real scenario, you might want to inject secrets here
-              # echo "SECRET_KEY=${{ secrets.SECRET_KEY }}" > .env
-              # For now, we assume .env is manually placed or we create a dummy one if critical
-              touch .env
-            fi
-
             sudo docker compose down
             sudo docker compose up -d --build
             sudo docker image prune -f
