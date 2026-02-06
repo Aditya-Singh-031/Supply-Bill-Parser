@@ -9,42 +9,22 @@ from api.models.schemas import (
 )
 from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
-from api.services.part_number_extractor import PartNumberExtractor # Import Extractor
+from api.services.part_number_extractor import PartNumberExtractor
 
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
     """
-    Saves extracted data to MongoDB AND updates the 'data' dict with extracted values.
+    Saves extracted data to MongoDB.
+    
+    CORRECT ORDER OF OPERATIONS:
+    1. Extract Line Items & Calculate Totals
+    2. Create Invoice Object (using those totals)
+    3. Save to DB
     """
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
     buyer = data.get("buyer", {})
     
-    # Date Handling
-    raw_date = meta.get("invoice_date")
-    final_date_str = None
-    if raw_date:
-        if isinstance(raw_date, (datetime, date)):
-            final_date_str = raw_date.isoformat()
-        else:
-            final_date_str = str(raw_date)
-    calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
-    invoice_create = InvoiceCreate(
-        job_id=job_id,
-        file_hash=file_hash, 
-        invoice_number=str(meta.get("invoice_number") or "UNKNOWN"),
-        invoice_date=final_date_str, 
-        vendor_name=seller.get("name"),
-        vendor_gstin=seller.get("gstin"),
-        buyer_name=buyer.get("name"),
-        buyer_gstin=buyer.get("gstin"),
-        po_number=meta.get("po_number"),
-        total_quantity=0.0,
-        total_amount=calculated_total,
-        pdf_url=f"/storage/pdfs/{filename}", 
-        extraction_confidence=0.95,
-        extraction_status=ExtractionStatus.COMPLETED
-    )
-
+    # --- 1. PROCESS LINE ITEMS FIRST (To get the Total) ---
     line_items = []
     raw_items = data.get("line_items", [])
     
@@ -54,7 +34,7 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
-        # --- EXTRACT PART NUMBER ---
+        # Extract Part Number
         ai_part_no = (
             item.get("part_number") or 
             item.get("part_no") or 
@@ -67,12 +47,11 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         # Call Extractor
         final_part_number = PartNumberExtractor.extract(description_text, ai_part_no)
         
-        # --- CRITICAL FIX: UPDATE THE ORIGINAL DICT ---
-        # This ensures the Excel Generator sees the new value!
+        # Update Original Dict for Excel
         item["part_number"] = final_part_number 
         
         li = LineItemCreate(
-            invoice_id=uuid4(),
+            invoice_id=uuid4(), # This gets linked properly in the DB service usually
             sl_number=idx,
             part_number=str(final_part_number),
             description=description_text,
@@ -84,6 +63,41 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         )
         line_items.append(li)
 
+    # --- 2. CALCULATE TOTAL AMOUNT ---
+    # Now that line_items exists, we can sum it up
+    calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
+
+    # --- 3. CREATE INVOICE OBJECT (With Total) ---
+    # Date Handling
+    raw_date = meta.get("invoice_date")
+    final_date_str = None
+    if raw_date:
+        if isinstance(raw_date, (datetime, date)):
+            final_date_str = raw_date.isoformat()
+        else:
+            final_date_str = str(raw_date)
+
+    invoice_create = InvoiceCreate(
+        job_id=job_id,
+        file_hash=file_hash, 
+        invoice_number=str(meta.get("invoice_number") or "UNKNOWN"),
+        invoice_date=final_date_str, 
+        vendor_name=seller.get("name"),
+        vendor_gstin=seller.get("gstin"),
+        buyer_name=buyer.get("name"),
+        buyer_gstin=buyer.get("gstin"),
+        po_number=meta.get("po_number"),
+        total_quantity=0.0,
+        
+        # Save the Calculated Total
+        total_amount=calculated_total, 
+        
+        pdf_url=f"/storage/pdfs/{filename}", 
+        extraction_confidence=0.95,
+        extraction_status=ExtractionStatus.COMPLETED
+    )
+
+    # --- 4. COMMIT TO DB ---
     bulk_payload = BulkInvoiceCreate(invoice=invoice_create, line_items=line_items)
     await db_service.create_invoice_with_line_items(bulk_payload)
 
@@ -116,10 +130,7 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         for item in items:
             row = base_row.copy()
             
-            # Now "part_number" is guaranteed to be there because save_to_mongo populated it
             p_num = item.get("part_number") or ""
-            
-            # Fallbacks just in case
             hsn = item.get("hsn_code") or item.get("hsn")
             desc = item.get("description") or item.get("item_description")
             
