@@ -29,6 +29,7 @@ class InvoiceBase(BaseModel):
     buyer_gstin: Optional[str] = None
     po_number: Optional[str] = None
     total_quantity: Optional[float] = 0.0
+    total_amount: Optional[float] = 0.0
     pdf_url: Optional[str] = None
     extraction_status: ExtractionStatus = ExtractionStatus.QUEUED
     extraction_confidence: Optional[float] = None

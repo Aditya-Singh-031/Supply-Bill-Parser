@@ -27,7 +27,7 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             final_date_str = raw_date.isoformat()
         else:
             final_date_str = str(raw_date)
-
+    calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
     invoice_create = InvoiceCreate(
         job_id=job_id,
         file_hash=file_hash, 
@@ -39,6 +39,7 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         buyer_gstin=buyer.get("gstin"),
         po_number=meta.get("po_number"),
         total_quantity=0.0,
+        total_amount=calculated_total,
         pdf_url=f"/storage/pdfs/{filename}", 
         extraction_confidence=0.95,
         extraction_status=ExtractionStatus.COMPLETED
