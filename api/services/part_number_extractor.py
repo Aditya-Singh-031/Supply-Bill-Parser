@@ -2,61 +2,63 @@ import re
 
 class PartNumberExtractor:
     """
-    A lightweight, robust heuristic model to extract Part Numbers 
-    buried inside Description text.
+    Robust heuristic model to extract Part Numbers from Description.
+    Logic: Split -> Filter Length -> Filter Alpha -> Select First
     """
 
-    # Regex to identify "Part Number-like" strings
-    # Rules: 
-    # 1. Alphanumeric (A-Z, 0-9)
-    # 2. Must contain at least one digit (to avoid words like "ASSEMBLY")
-    # 3. Length between 5 and 20 characters (filters out "QTY", "1", "NO")
-    PART_NO_PATTERN = re.compile(r'\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,20}\b')
-
-    # Exclude common noise words that might look like codes but aren't
-    BLACKLIST = {"GASKET", "ENGINE", "ELEMENT", "FILTER", "ASSEMBLY", "MANIFOLD", "NUMBER", "BATCH", "TOTAL"}
+    # Exclude common noise words that might slip through
+    BLACKLIST = {
+        "GASKET", "ENGINE", "ELEMENT", "FILTER", "ASSEMBLY", "MANIFOLD", 
+        "NUMBER", "BATCH", "TOTAL", "VOLKSWAGEN", "INVOICE", "DATED", "VEHICLE"
+    }
 
     @staticmethod
     def extract(description: str, existing_part_no: str = None) -> str:
         """
-        Main extraction logic.
-        
-        Args:
-            description: The full item description line.
-            existing_part_no: The part number found by AI (if any).
-        
-        Returns:
-            The best guess for a Part Number, or an empty string.
+        Extracts part number from description string.
         """
-        # 1. Trust the AI if it found something decent (length > 3)
-        if existing_part_no and len(existing_part_no.strip()) > 3:
-            return existing_part_no.strip()
+        # 1. Trust AI if it found a strong candidate
+        if existing_part_no and len(str(existing_part_no).strip()) > 3:
+            return str(existing_part_no).strip()
 
         if not description:
             return ""
 
-        # 2. Pre-processing: Handle splitters like hyphens, newlines, colons
-        # Example: "631002600R-FDR ASSY" -> "631002600R FDR ASSY"
+        # 2. Clean & Split
+        # Replace special chars with space, then uppercase
         clean_desc = description.upper().replace('\n', ' ').replace('-', ' ').replace(':', ' ').replace('|', ' ')
+        words = clean_desc.split(" ")
         
-        # 3. Find all candidates matching the pattern
-        candidates = PartNumberExtractor.PART_NO_PATTERN.findall(clean_desc)
-        
-        # 4. Filter candidates
-        valid_candidates = [
-            c for c in candidates 
-            if c not in PartNumberExtractor.BLACKLIST
-        ]
-        
+        valid_candidates = []
+
+        # 3. The Funnel (Your Logic)
+        for word in words:
+            # Clean punctuation from edges
+            word = word.strip(".,;()")
+            
+            # Filter 1: Length must be >= 8
+            if len(word) < 8:
+                continue
+                
+            # Filter 2: Must contain at least one digit (Not all alpha)
+            if word.isalpha():
+                continue
+            
+            # Filter 3: Check Blacklist
+            if word in PartNumberExtractor.BLACKLIST:
+                continue
+            
+            # Filter 4: Ensure it's not just a long number (optional, but usually part numbers are alphanumeric)
+            # Keeping it simple for now as requested: just checking it's not pure alpha.
+            
+            valid_candidates.append(word)
+
+        # DEBUG: Print candidates to logs (Remind me to comment this out later!)
+        if valid_candidates:
+            print(f"   🔍 DEBUG: Description: '{description[:30]}...' -> Candidates: {valid_candidates}")
+
+        # 4. Selection
         if not valid_candidates:
             return ""
-
-        # 5. Selection Strategy:
-        # Part numbers are almost ALWAYS at the start of the description 
-        # or the very first distinctive code.
+            
         return valid_candidates[0]
-
-# Usage Example:
-# extractor = PartNumberExtractor()
-# part_no = extractor.extract("631002600R-FDR ASSY,FR RH")
-# Output: "631002600R"

@@ -9,10 +9,11 @@ from api.models.schemas import (
 )
 from api.core.config import BILLS_EXCEL_DIR
 from api.services.database_service import DatabaseService
-from api.services.part_number_extractor import PartNumberExtractor
+from api.services.part_number_extractor import PartNumberExtractor # Import Extractor
+
 async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str, data: dict, file_hash: str):
     """
-    Saves extracted data to MongoDB.
+    Saves extracted data to MongoDB AND updates the 'data' dict with extracted values.
     """
     meta = data.get("invoice_metadata", {})
     seller = data.get("seller", {})
@@ -52,28 +53,27 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
             try: return float(str(val).replace(",", "").replace("₹", "").strip())
             except: return 0.0
 
-        # --- PART NUMBER EXTRACTION LOGIC ---
-        # 1. Get what the AI found (checking all possible keys)
+        # --- EXTRACT PART NUMBER ---
         ai_part_no = (
             item.get("part_number") or 
             item.get("part_no") or 
             item.get("item_code") or 
-            item.get("sku") or
+            item.get("sku") or 
             item.get("parts_code")
         )
-        
         description_text = str(item.get("description") or "")
-
-        # 2. CALL THE EXTRACTOR
-        # Takes the description and the AI's attempt. 
-        # If AI found nothing valid, it digs into the description using our new regex rules.
+        
+        # Call Extractor
         final_part_number = PartNumberExtractor.extract(description_text, ai_part_no)
-        # ------------------------------------
-
+        
+        # --- CRITICAL FIX: UPDATE THE ORIGINAL DICT ---
+        # This ensures the Excel Generator sees the new value!
+        item["part_number"] = final_part_number 
+        
         li = LineItemCreate(
             invoice_id=uuid4(),
             sl_number=idx,
-            part_number=str(final_part_number), # <--- Uses the robustly extracted result
+            part_number=str(final_part_number),
             description=description_text,
             hsn_code=str(item.get("hsn_code") or item.get("hsn") or ""),
             quantity=safe_float(item.get("quantity")),
@@ -115,15 +115,19 @@ def generate_consolidated_excel(job_id: str, data_list: List[dict]) -> str:
         for item in items:
             row = base_row.copy()
             
-            p_num = item.get("part_number") or item.get("parts_code")
+            # Now "part_number" is guaranteed to be there because save_to_mongo populated it
+            p_num = item.get("part_number") or ""
+            
+            # Fallbacks just in case
             hsn = item.get("hsn_code") or item.get("hsn")
+            desc = item.get("description") or item.get("item_description")
             
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             
             row.update({
                 "Part Number": p_num,
-                "Description": item.get("description"),
+                "Description": desc,
                 "HSN": hsn,
                 "Quantity": qty,
                 "Unit Price": price,
