@@ -1,9 +1,11 @@
 """
 FastAPI Main Application
 """
+import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles # <--- IMPORT THIS
 from contextlib import asynccontextmanager
 
 from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
@@ -16,17 +18,14 @@ from api.routes import invoice
 from api.routes import auth
 from api.routes import users
 from api.routes import dashboard
+from api.routes import operations # <--- NEW IMPORT
 
 # Startup and shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handle startup and shutdown"""
     print("🚀 Starting Invoice Parser API...")
-    
-    # 1. Connect to MongoDB
     await connect_to_mongo()
     
-    # 2. Initialize Indexes
     try:
         db = get_database()
         db_service = DatabaseService(db)
@@ -34,22 +33,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Failed to create database indexes: {e}")
 
-    # 3. Test Redis connection
     if RedisClient.ping():
         print("✅ Redis connection successful")
     else:
         print("⚠️  Redis connection failed - job tracking will not work!")
     
-    # --- DEBUG: List all active routes ---
     print("\n📍 ACTIVE ROUTES:")
-    print(f"   👉 Auth:      {API_PREFIX}/auth/login")
-    print(f"   👉 Users:     {API_PREFIX}/users")
-    print(f"   👉 Dashboard: {API_PREFIX}/dashboard/stats")
-    print(f"   👉 Invoices:  {API_PREFIX}/invoices/upload")
+    print(f"   👉 Auth:       {API_PREFIX}/auth/login")
+    print(f"   👉 Operations: {API_PREFIX}/operations/list")
     print("\n")
 
     yield
-    
     await close_mongo_connection()
     print("👋 Shutting down Invoice Parser API...")
 
@@ -70,18 +64,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- REGISTER ALL ROUTERS ---
-# 1. Invoices (Note the /invoices prefix)
+# --- REGISTER ROUTERS ---
 app.include_router(invoice.router, prefix=API_PREFIX + "/invoices", tags=["Invoices"])
-
-# 2. Auth (Login)
 app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
-
-# 3. Users (Management)
 app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])
-
-# 4. Dashboard (Stats & Suppliers)
 app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"])
+app.include_router(operations.router, prefix=API_PREFIX + "/operations", tags=["Operations"]) # <--- NEW ROUTE
+
+# --- MOUNT STORAGE FOR PDF VIEWING ---
+# Ensure directory exists first
+os.makedirs("storage/pdfs", exist_ok=True)
+# This makes http://localhost:8000/storage/pdfs/file.pdf accessible
+app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
 
 @app.get("/health")
