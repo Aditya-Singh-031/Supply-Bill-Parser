@@ -21,7 +21,7 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 # CORS Settings
 CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:3000,http://localhost:3001,https://ops.morsebiz.com"
+    "http://localhost:3000,http://localhost:3001,https://ops.morsebiz.com,http://bills-parser.morsebiz.com/"
 ).split(",")
 
 # Redis Settings
