@@ -37,7 +37,7 @@ class PartNumberExtractor:
             word = word.strip(".,;()")
             
             # Filter 1: Length must be >= 8
-            if len(word) < 8:
+            if len(word) < 5:
                 continue
                 
             # Filter 2: Must contain at least one digit (Not all alpha)
