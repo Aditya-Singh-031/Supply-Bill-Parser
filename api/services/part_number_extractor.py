@@ -11,7 +11,7 @@ class PartNumberExtractor:
     # 1. Alphanumeric (A-Z, 0-9)
     # 2. Must contain at least one digit (to avoid words like "ASSEMBLY")
     # 3. Length between 5 and 20 characters (filters out "QTY", "1", "NO")
-    PART_NO_PATTERN = re.compile(r'\b(?=[A-Z0-9]*\d)[A-Z0-9]{5,20}\b')
+    PART_NO_PATTERN = re.compile(r'\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,20}\b')
 
     # Exclude common noise words that might look like codes but aren't
     BLACKLIST = {"GASKET", "ENGINE", "ELEMENT", "FILTER", "ASSEMBLY", "MANIFOLD", "NUMBER", "BATCH", "TOTAL"}
@@ -47,7 +47,7 @@ class PartNumberExtractor:
             c for c in candidates 
             if c not in PartNumberExtractor.BLACKLIST
         ]
-
+        
         if not valid_candidates:
             return ""
 
