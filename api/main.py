@@ -12,7 +12,8 @@ from api.core.config import API_PREFIX, CORS_ORIGINS, API_VERSION
 from api.core.redis_client import RedisClient
 from api.core.database import connect_to_mongo, close_mongo_connection, get_database
 from api.services.database_service import DatabaseService
-
+from purchase_orders.routes import router as po_router
+from suppliers.routes import router as suppliers_router
 # --- IMPORT ALL ROUTERS ---
 from api.routes import invoice
 from api.routes import auth
@@ -70,7 +71,8 @@ app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
 app.include_router(users.router, prefix=API_PREFIX + "/users", tags=["Users"])
 app.include_router(dashboard.router, prefix=API_PREFIX + "/dashboard", tags=["Dashboard"])
 app.include_router(operations.router, prefix=API_PREFIX + "/operations", tags=["Operations"]) # <--- NEW ROUTE
-
+app.include_router(po_router,        prefix="/api/v1")
+app.include_router(suppliers_router, prefix="/api/v1")
 # --- MOUNT STORAGE FOR PDF VIEWING ---
 # Ensure directory exists first
 os.makedirs("storage/pdfs", exist_ok=True)
