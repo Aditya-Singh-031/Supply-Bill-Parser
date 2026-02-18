@@ -65,7 +65,18 @@ async def save_to_mongo(db_service: DatabaseService, job_id: UUID, filename: str
         line_items.append(li)
 
     # --- 2. CALCULATE TOTAL AMOUNT ---
-    calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
+    # Try to get the true grand total from the AI's 'totals' block first
+    totals_block = data.get("totals", {})
+    ai_grand_total = totals_block.get("invoice_amount")
+    
+    if ai_grand_total not in [None, ""]:
+        try:
+            calculated_total = float(str(ai_grand_total).replace(",", "").replace("₹", "").strip())
+        except ValueError:
+            calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
+    else:
+        # Fallback to basic math if the AI missed the grand total
+        calculated_total = sum(item.quantity * item.unit_price for item in line_items if item.quantity and item.unit_price)
 
     # --- 3. CREATE INVOICE OBJECT ---
     raw_date = meta.get("invoice_date")
