@@ -1,0 +1,43 @@
+name: Deploy to VPS Azure 2026
+
+on:
+  push:
+    branches:
+      - main  
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up SSH keys
+        uses: webfactory/ssh-agent@v0.5.0
+        with:
+          ssh-private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+
+      - name: Create .env file
+        run: echo "${{ secrets.ENV_FILE }}" > .env
+
+      - name: Deploy to VPS
+        run: |
+          ssh -o StrictHostKeyChecking=no azureuser@74.225.254.175 "mkdir -p /home/azureuser/projects/supply-bill-parser"
+
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='__pycache__' \
+            --exclude='storage' \
+            --exclude='logs' \
+            ./ azureuser@74.225.254.175:/home/azureuser/projects/supply-bill-parser/
+
+          ssh -o StrictHostKeyChecking=no azureuser@74.225.254.175 << 'EOF'
+            cd /home/azureuser/projects/supply-bill-parser
+            
+            sudo docker compose down
+            sudo docker compose up -d --build
+            sudo docker image prune -f
+          EOF
