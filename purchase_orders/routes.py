@@ -8,9 +8,11 @@ from enum import Enum
 router = APIRouter(prefix="/purchase-orders", tags=["Purchase Orders"])
 
 
+# REPLACE WITH THIS (correct — calls get_database() at request time):
 def get_db():
-    from main import db
-    return db
+    from api.core.database import get_database
+    return get_database()
+
 
 
 # ─── Enums ───────────────────────────────────────────────

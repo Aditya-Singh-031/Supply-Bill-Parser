@@ -6,9 +6,11 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/suppliers", tags=["Suppliers"])
 
+# REPLACE WITH THIS (correct — calls get_database() at request time):
 def get_db():
-    from main import db
-    return db
+    from api.core.database import get_database
+    return get_database()
+
 
 class SupplierCreate(BaseModel):
     supp_name: str = Field(..., min_length=1)
