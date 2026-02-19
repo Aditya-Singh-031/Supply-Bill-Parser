@@ -111,10 +111,14 @@ async def get_job_status(job_id: str):
             if job_data != last_update:
                 yield f"event: progress\ndata: {json.dumps(job_data)}\n\n"
                 last_update = job_data
-            
-            if job_data.get("status") in ["completed", "failed"]:
-                yield f"event: complete\ndata: {json.dumps(job_data)}\n\n"
-                break
+                
+                # Check completion inside this block so we don't break early
+                if job_data.get("status") in ["completed", "failed"]:
+                    yield f"event: complete\ndata: {json.dumps(job_data)}\n\n"
+                    break
+            else:
+                # 💥 THE FIX: Send a heartbeat ping every 2 seconds to keep Nginx alive
+                yield ": keep-alive\n\n"
             
             await asyncio.sleep(2)
 
