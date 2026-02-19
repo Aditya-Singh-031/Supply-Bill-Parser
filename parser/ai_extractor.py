@@ -53,69 +53,128 @@ Extract all invoice data into the structured format.
 
 def extract_invoice_level1(
     invoice_content: Dict[str, Any],
-    source_file: str
+    source_file: str,
+    progress_callback=None
 ) -> Invoice:
     """
     Level-1 extraction: Initial AI extraction using structured outputs.
-    
-    Args:
-        invoice_content: Dict from PDF parser with 'text' and 'tables'
-        source_file: Original PDF filename
-        
-    Returns:
-        Invoice (Pydantic model)
-        
-    Raises:
-        Exception: If OpenAI API call fails
+    Automatically detects massive invoices and chunks them to avoid token limits.
     """
     if DEBUG:
         print("  Running Level-1 AI extraction...")
+        
+    text = invoice_content.get('text', '')
+    tables = invoice_content.get('tables', [])
     
-    prompt = build_extraction_prompt(invoice_content)
+    # ─── Standard Extraction (Small to Medium Invoices) ───
+    # If it's under the safety threshold, do a standard single-pass extraction
+    if len(text) < 25000 and len(tables) < 5:
+        if progress_callback:
+            progress_callback(30, "Extracting data with AI...")
+            
+        prompt = build_extraction_prompt(invoice_content)
+        try:
+            completion = client.beta.chat.completions.parse(
+                model=OPENAI_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert invoice data extraction agent. Extract all information accurately. Use null for missing fields."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=Invoice,
+                temperature=TEMPERATURE
+            )
+            invoice = completion.choices[0].message.parsed
+            
+            if invoice is None: raise ValueError("OpenAI returned no parsed content")
+            
+            invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
+            invoice.extraction_metadata.source_file_name = source_file
+            return invoice
+        except Exception as e:
+            if DEBUG: print(f"  ❌ Level-1 extraction failed: {e}")
+            raise
+
+    # ─── Chunked Extraction (Massive Invoices like RDSL) ───
+    if DEBUG:
+        print("  ⚠️ Massive invoice detected. Initiating chunked extraction...")
+        
+    if progress_callback:
+        progress_callback(20, "Massive invoice detected. Splitting into chunks...")
+        
+    # Split text into ~15000 character chunks
+    chunk_size = 15000
+    text_chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     
-    try:
-        # Call OpenAI with structured outputs
-        completion = client.beta.chat.completions.parse(
-            model=OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert invoice data extraction agent. "
-                        "Extract all information accurately into the structured schema. "
-                        "Preserve text exactly as written. Use null for missing fields."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            response_format=Invoice,
-            temperature=TEMPERATURE
-        )
+    # Split tables into chunks of 3
+    table_chunk_size = 3
+    table_chunks = [tables[i:i+table_chunk_size] for i in range(0, len(tables), table_chunk_size)]
+    
+    # Balance arrays
+    num_chunks = max(len(text_chunks), len(table_chunks))
+    text_chunks += [''] * (num_chunks - len(text_chunks))
+    table_chunks += [[]] * (num_chunks - len(table_chunks))
+    
+    master_invoice = None
+    all_line_items = []
+    
+    for i in range(num_chunks):
+        if progress_callback:
+            # Scale progress dynamically between 20% and 75%
+            current_prog = 20 + int((i / num_chunks) * 55)
+            progress_callback(current_prog, f"Parsing chunk {i+1} of {num_chunks}...")
+            
+        prompt = build_extraction_prompt({"text": text_chunks[i], "tables": table_chunks[i]})
         
-        # Extract the parsed response
-        invoice = completion.choices[0].message.parsed
+        # Tell AI to ignore metadata on chunks 2+ to save processing tokens
+        sys_msg = "You are an expert invoice data extraction agent."
+        if i > 0:
+            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS. Leave metadata null."
+            
+        try:
+            completion = client.beta.chat.completions.parse(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=Invoice,
+                temperature=TEMPERATURE
+            )
+            chunk_invoice = completion.choices[0].message.parsed
+            
+            if chunk_invoice is None:
+                continue
+                
+            if i == 0:
+                # First chunk forms the base metadata
+                master_invoice = chunk_invoice
+                all_line_items.extend(chunk_invoice.line_items)
+            else:
+                # Subsequent chunks just append line items
+                all_line_items.extend(chunk_invoice.line_items)
+                
+        except Exception as e:
+            if DEBUG: print(f"  ⚠️ Chunk {i+1} failed: {e}")
+            continue # Try to push through to the next chunk even if one fails
+            
+    if not master_invoice:
+        raise ValueError("All chunks failed to extract data. Token limit or API error.")
         
-        if invoice is None:
-            raise ValueError("OpenAI returned no parsed content")
+    # Consolidate
+    master_invoice.line_items = all_line_items
+    master_invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
+    master_invoice.extraction_metadata.source_file_name = source_file
+    
+    if progress_callback:
+        progress_callback(80, "Consolidating extracted chunks...")
         
-        # Update metadata
-        invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
-        invoice.extraction_metadata.source_file_name = source_file
+    if DEBUG:
+        print(f"  ✅ Chunking complete. Combined {len(all_line_items)} total line items.")
         
-        if DEBUG:
-            print(f"  ✅ Extracted {len(invoice.line_items)} line items")
-            print(f"  ✅ Invoice number: {invoice.invoice_metadata.invoice_number}")
-            print(f"  ✅ Total amount: ₹{invoice.totals.invoice_amount}")
-        
-        return invoice
-        
-    except Exception as e:
-        if DEBUG:
-            print(f"  ❌ Level-1 extraction failed: {e}")
-        raise
+    return master_invoice
 
 
 def extract_invoice_level2(

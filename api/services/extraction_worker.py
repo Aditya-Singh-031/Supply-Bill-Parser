@@ -1,5 +1,3 @@
-# api/services/extraction_worker.py
-
 import os
 import hashlib
 import traceback
@@ -11,24 +9,23 @@ try:
     from parser.pdf_parser import extract_invoice_content
     from parser.ai_extractor import extract_invoice_level1
     
-    def extract_and_validate_invoice(file_path):
+    # ─── UPDATED: Now accepts progress_callback ───
+    def extract_and_validate_invoice(file_path, progress_callback=None):
         filename = os.path.basename(file_path)
         try:
             # 1. Parse PDF Structure
+            if progress_callback: progress_callback(10, "Reading PDF structure...")
             invoice_content_dict = extract_invoice_content(file_path)
             
-            # 2. AI Extraction
-            raw_result = extract_invoice_level1(invoice_content_dict, filename)
+            # 2. AI Extraction (Passes callback down for chunking updates!)
+            if progress_callback: progress_callback(20, "Initiating AI Extraction...")
+            raw_result = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
             
             # 3. Convert to Dict (Pydantic -> Dict)
             if hasattr(raw_result, "model_dump"): return raw_result.model_dump()
             elif hasattr(raw_result, "dict"): return raw_result.dict()
             elif isinstance(raw_result, dict): return raw_result
             else: return {"error": f"Invalid format: {type(raw_result)}"}
-        
-        except openai.LengthFinishReasonError:
-            # CATCH THE HUGE FILE ERROR
-            return {"error": "AI Error: Invoice too large (Token limit exceeded)."}
             
         except Exception as e:
             # Catch generic errors
@@ -38,7 +35,7 @@ try:
 
 except ImportError as e:
     print(f"⚠️ Parser import failed: {e}")
-    def extract_and_validate_invoice(path): return {"error": "Parser missing"}
+    def extract_and_validate_invoice(path, progress_callback=None): return {"error": "Parser missing"}
 
 
 def calculate_file_hash(file_path):
@@ -57,6 +54,11 @@ def process_single_pdf_worker(args):
     job_id, file_path, index, file_hash, is_duplicate = args
     filename = os.path.basename(file_path).split('_', 1)[1]
 
+    # ─── THE MAGIC WIRING: LIVE CALLBACK ───
+    def live_progress_callback(percent: int, message: str):
+        # Instantly updates Redis so your SSE stream sends it to the frontend!
+        RedisClient.update_pdf_progress(job_id, str(index), "processing", percent, message)
+
     try:
         # 1. Duplicate Check
         if is_duplicate:
@@ -73,23 +75,23 @@ def process_single_pdf_worker(args):
             }
 
         # 2. Start Extraction
-        RedisClient.update_pdf_progress(job_id, str(index), "parsing", 10, "Extracting...")
+        live_progress_callback(5, "Worker started...")
         print(f"   ⚡ Worker processing: {filename}")
         
-        result = extract_and_validate_invoice(file_path)
+        # ─── INJECT CALLBACK HERE ───
+        result = extract_and_validate_invoice(file_path, progress_callback=live_progress_callback)
         
         # 3. Handle Errors
         if not result or (isinstance(result, dict) and result.get("error")):
             error_msg = result.get("error") if isinstance(result, dict) else "Unknown Error"
-            # Important: Shorten error message for UI
             short_error = error_msg[:100] + "..." if len(error_msg) > 100 else error_msg
             
             RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, f"Error: {short_error}")
-            return {"success": False, "index": index, "filename": filename, "error": error_msg}
+            return {"success": False, "index": index, "filename": filename, "error": error_msg, "temp_path": file_path}
 
         # 4. Success
         items = result.get("line_items", [])
-        RedisClient.update_pdf_progress(job_id, str(index), "extracting", 90, f"Extracted {len(items)} items")
+        live_progress_callback(90, f"Extracted {len(items)} items. Finalizing...")
 
         return {
             "success": True, 
@@ -102,5 +104,5 @@ def process_single_pdf_worker(args):
         }
 
     except Exception as e:
-        RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, "System Error")
-        return {"success": False, "index": index, "filename": filename, "error": str(e)}
+        RedisClient.update_pdf_progress(job_id, str(index), "failed", 0, f"System Error: {str(e)[:50]}")
+        return {"success": False, "index": index, "filename": filename, "error": str(e), "temp_path": file_path}

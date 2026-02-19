@@ -31,7 +31,8 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
     loop = asyncio.get_running_loop()
     with ProcessPoolExecutor(max_workers=min(4, len(file_paths))) as executor:
         futures = [loop.run_in_executor(executor, process_single_pdf_worker, arg) for arg in worker_args]
-        results = await asyncio.gather(*futures)
+        # return_exceptions=True prevents one massive PDF crash from taking down the whole batch
+        results = await asyncio.gather(*futures, return_exceptions=True)
 
     # --- C. SAVE & MERGE RESULTS ---
     successful_count = 0
@@ -41,11 +42,19 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
     storage_dir = "storage/pdfs"
     os.makedirs(storage_dir, exist_ok=True)
 
-    for res in results:
-        index = str(res["index"])
+    for i, res in enumerate(results):
+        index = str(i)
         
-        if res["success"]:
-            # 1. DUPLICATE CASE
+        # 1. CRITICAL WORKER CRASH (e.g. Out of Memory)
+        if isinstance(res, Exception):
+            print(f"❌ Worker completely crashed on file {index}: {res}")
+            RedisClient.update_pdf_progress(job_id, index, "failed", 100, f"Critical Crash: {str(res)}")
+            failed_count += 1
+            continue
+
+        # 2. STANDARD PROCESSING
+        if res.get("success"):
+            # DUPLICATE CASE
             if res["is_duplicate"]:
                 print(f"   🔄 Duplicate found: {res['filename']}")
                 existing = await db_service.get_invoice_by_hash(res["file_hash"])
@@ -56,7 +65,6 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     data["line_items"] = [l.dict() for l in lines]
                     data["filename"] = res["filename"]
                     
-                    # Calc Stats for UI
                     item_count = len(lines)
                     total_amt = sum(l.quantity * l.unit_price for l in lines if l.quantity and l.unit_price)
                     
@@ -71,7 +79,7 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                 
                 if os.path.exists(res["temp_path"]): os.remove(res["temp_path"])
                 
-            # 2. NEW FILE CASE (The Fix)
+            # NEW FILE CASE
             else:
                 try:
                     final_path = os.path.join(storage_dir, f"{job_id}_{res['filename']}")
@@ -79,11 +87,9 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     
                     await save_to_mongo(db_service, UUID(job_id), f"{job_id}_{res['filename']}", res["data"], res["file_hash"])
                     
-                    # --- FIX START: Calculate Stats for New Files ---
                     raw_items = res["data"].get("line_items", [])
                     item_count = len(raw_items)
                     
-                    # Calculate total safely from the raw dict
                     total_amt = 0.0
                     for item in raw_items:
                         try:
@@ -92,14 +98,12 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                             total_amt += (q * p)
                         except: pass
 
-                    # Send Stats to Redis (So UI shows them)
                     RedisClient.update_pdf_progress(
                         job_id, index, "completed", 100, 
                         "Saved", 
                         line_items=item_count, 
                         total_amount=total_amt
                     )
-                    # --- FIX END ---
 
                     successful_count += 1
                     data = res["data"].copy()
@@ -109,10 +113,16 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                 except Exception as e:
                     print(f"❌ Save Error: {e}")
                     traceback.print_exc()
-                    RedisClient.update_pdf_progress(job_id, index, "failed", 100, "Save Failed")
+                    RedisClient.update_pdf_progress(job_id, index, "failed", 100, "Save to Database Failed")
                     failed_count += 1
                     if os.path.exists(res["temp_path"]): os.remove(res["temp_path"])
         else:
+            # --- FIX: WORKER EXTRACTION FAILED ---
+            error_msg = res.get("error", "Extraction failed")
+            print(f"❌ Extraction Failed for file {index}: {error_msg}")
+            
+            # Tell Redis it failed so the UI stops hanging!
+            RedisClient.update_pdf_progress(job_id, index, "failed", 100, error_msg[:60]) 
             failed_count += 1
             if os.path.exists(res.get("temp_path", "")): os.remove(res.get("temp_path", ""))
 

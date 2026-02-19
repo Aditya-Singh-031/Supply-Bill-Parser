@@ -43,26 +43,10 @@ class ProcessingStatus:
 def process_invoice(
     pdf_path: str,
     output_dir: Path = None,
-    enable_level2: bool = True
+    enable_level2: bool = True,
+    progress_callback=None  # <--- Added Callback
 ) -> Tuple[Optional[Invoice], ProcessingStatus]:
-    """
-    Process a single invoice PDF through the complete pipeline.
     
-    Pipeline stages:
-    1. Parse PDF → extract text and tables
-    2. Level-1 AI extraction → structured Invoice object
-    3. Validation → check mathematical accuracy
-    4. Level-2 correction (if validation fails and enabled)
-    5. Save final JSON
-    
-    Args:
-        pdf_path: Path to invoice PDF
-        output_dir: Directory to save JSON (default: BILLS_JSON_DIR)
-        enable_level2: Whether to run Level-2 correction on validation failure
-        
-    Returns:
-        Tuple of (Invoice object or None, ProcessingStatus)
-    """
     if output_dir is None:
         output_dir = BILLS_JSON_DIR
     
@@ -70,121 +54,45 @@ def process_invoice(
     start_time = datetime.now()
     
     try:
-        # ============================================
         # Stage 1: Parse PDF
-        # ============================================
-        if DEBUG:
-            print(f"\n{'='*60}")
-            print(f"Processing: {status.pdf_name}")
-            print(f"{'='*60}")
-            print("  [Stage 1/5] Parsing PDF...")
-        
+        if progress_callback: progress_callback(10, "Parsing PDF Structure...")
         invoice_content = extract_invoice_content(pdf_path)
         
-        if DEBUG:
-            print(f"    ✅ Extracted {invoice_content['pages']} pages")
-            print(f"    ✅ Text length: {len(invoice_content['text'])} chars")
-            print(f"    ✅ Tables found: {len(invoice_content.get('tables', []))}")
+        # Stage 2: AI Extraction (Pass callback down)
+        if progress_callback: progress_callback(20, "Initiating AI Extraction...")
+        invoice = extract_invoice_level1(invoice_content, status.pdf_name, progress_callback)
         
-        # ============================================
-        # Stage 2: Level-1 AI Extraction
-        # ============================================
-        if DEBUG:
-            print("  [Stage 2/5] Running Level-1 AI extraction...")
-        
-        invoice = extract_invoice_level1(invoice_content, status.pdf_name)
         status.invoice_number = invoice.invoice_metadata.invoice_number
         status.status = "level1_done"
         
-        # ============================================
         # Stage 3: Validation
-        # ============================================
-        if DEBUG:
-            print("  [Stage 3/5] Validating extraction...")
-        
+        if progress_callback: progress_callback(85, "Validating Extracted Data...")
         validation_report = validate_invoice(invoice)
         status.validation_passed = validation_report.passed
         
-        # ============================================
-        # Stage 4: Level-2 Correction (if needed)
-        # ============================================
+        # Stage 4: Level-2 Correction
         if not validation_report.passed and enable_level2:
-            if DEBUG:
-                print("  [Stage 4/5] Validation failed - running Level-2 correction...")
-            
-            # Generate validation report text for AI
+            if progress_callback: progress_callback(90, "Fixing math discrepancies via AI...")
             validation_text = validation_report.to_prompt_text()
-            
-            # Run Level-2 correction
             invoice = extract_invoice_level2(
-                invoice_content,
-                invoice,
-                validation_text,
-                status.pdf_name
+                invoice_content, invoice, validation_text, status.pdf_name
             )
-            
-            # Re-validate
             validation_report_v2 = validate_invoice(invoice)
             status.validation_passed = validation_report_v2.passed
             status.status = "level2_done"
-            
-            if DEBUG:
-                if validation_report_v2.passed:
-                    print("    ✅ Level-2 correction successful - validation now passes")
-                else:
-                    print("    ⚠️  Level-2 correction did not fully resolve issues")
-                    print(f"       Remaining discrepancies: {len(validation_report_v2.discrepancies)}")
         
-        elif not validation_report.passed:
-            if DEBUG:
-                print("  [Stage 4/5] Validation failed but Level-2 disabled")
-                print(f"    ⚠️  {len(validation_report.discrepancies)} discrepancies found")
-        
-        else:
-            if DEBUG:
-                print("  [Stage 4/5] Validation passed - Level-2 not needed ✅")
-        
-        # ============================================
         # Stage 5: Save JSON
-        # ============================================
-        if DEBUG:
-            print("  [Stage 5/5] Saving JSON output...")
-        
-        # Generate output filename
+        if progress_callback: progress_callback(95, "Saving Results...")
         pdf_stem = Path(pdf_path).stem
-        output_filename = f"{pdf_stem}.json"
-        output_path = output_dir / output_filename
+        output_path = output_dir / f"{pdf_stem}.json"
         
-        # Save invoice JSON
         with open(output_path, 'w') as f:
-            json.dump(
-                invoice.model_dump(mode='json'),
-                f,
-                indent=2,
-                default=str
-            )
+            json.dump(invoice.model_dump(mode='json'), f, indent=2, default=str)
         
         status.output_json_path = output_path
-        
-        if DEBUG:
-            print(f"    ✅ Saved to: {output_path}")
-        
-        # Calculate processing time
         status.processing_time_seconds = (datetime.now() - start_time).total_seconds()
         
-        # ============================================
-        # Summary
-        # ============================================
-        if DEBUG:
-            print(f"\n{'='*60}")
-            print(f"✅ Processing complete!")
-            print(f"   Invoice: {status.invoice_number}")
-            print(f"   Status: {status.status}")
-            print(f"   Validation: {'✅ PASSED' if status.validation_passed else '⚠️  FAILED'}")
-            print(f"   Time: {status.processing_time_seconds:.2f}s")
-            print(f"   Output: {output_path.name}")
-            print(f"{'='*60}\n")
-        
+        if progress_callback: progress_callback(100, "Completed Successfully!")
         return invoice, status
         
     except Exception as e:
@@ -192,11 +100,8 @@ def process_invoice(
         status.error_message = str(e)
         status.processing_time_seconds = (datetime.now() - start_time).total_seconds()
         
-        if DEBUG:
-            print(f"\n{'='*60}")
-            print(f"❌ Processing FAILED")
-            print(f"   Error: {e}")
-            print(f"{'='*60}\n")
+        # Trigger failure state to unfreeze frontend
+        if progress_callback: progress_callback(100, f"Failed: {str(e)}")
         
         return None, status
 
