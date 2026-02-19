@@ -67,8 +67,8 @@ def extract_invoice_level1(
     tables = invoice_content.get('tables', [])
     
     # ─── Standard Extraction (Small to Medium Invoices) ───
-    # If it's under the safety threshold, do a standard single-pass extraction
-    if len(text) < 25000 and len(tables) < 5:
+    # Lowered the threshold to play it safe
+    if len(text) < 12000 and len(tables) < 2:
         if progress_callback:
             progress_callback(30, "Extracting data with AI...")
             
@@ -94,25 +94,26 @@ def extract_invoice_level1(
             invoice.extraction_metadata.source_file_name = source_file
             return invoice
         except Exception as e:
-            if DEBUG: print(f"  ❌ Level-1 extraction failed: {e}")
-            raise
+            if DEBUG: print(f"  ⚠️ Standard extraction failed, falling back to chunking: {e}")
+            # If standard fails (e.g. token limit hit), WE DO NOT RAISE. 
+            # We let it naturally fall through to the chunking logic below!
 
     # ─── Chunked Extraction (Massive Invoices like RDSL) ───
     if DEBUG:
-        print("  ⚠️ Massive invoice detected. Initiating chunked extraction...")
+        print("  ⚠️ Massive invoice or fallback detected. Initiating chunked extraction...")
         
     if progress_callback:
-        progress_callback(20, "Massive invoice detected. Splitting into chunks...")
+        progress_callback(20, "Massive invoice detected. Splitting into bite-sized chunks...")
         
-    # Split text into ~15000 character chunks
-    chunk_size = 15000
+    # 💥 FIX: Make chunks much smaller (4,000 chars instead of 15,000)
+    chunk_size = 4000
     text_chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     
-    # Split tables into chunks of 3
-    table_chunk_size = 3
+    # 💥 FIX: Process only 1 table per chunk
+    table_chunk_size = 1
     table_chunks = [tables[i:i+table_chunk_size] for i in range(0, len(tables), table_chunk_size)]
     
-    # Balance arrays
+    # Balance arrays so we iterate smoothly
     num_chunks = max(len(text_chunks), len(table_chunks))
     text_chunks += [''] * (num_chunks - len(text_chunks))
     table_chunks += [[]] * (num_chunks - len(table_chunks))
@@ -122,7 +123,7 @@ def extract_invoice_level1(
     
     for i in range(num_chunks):
         if progress_callback:
-            # Scale progress dynamically between 20% and 75%
+            # Scale progress dynamically
             current_prog = 20 + int((i / num_chunks) * 55)
             progress_callback(current_prog, f"Parsing chunk {i+1} of {num_chunks}...")
             
@@ -130,7 +131,7 @@ def extract_invoice_level1(
         
         # Tell AI to ignore metadata on chunks 2+ to save processing tokens
         sys_msg = "You are an expert invoice data extraction agent."
-        if i > 0:
+        if master_invoice is not None:
             sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS. Leave metadata null."
             
         try:
@@ -148,22 +149,21 @@ def extract_invoice_level1(
             if chunk_invoice is None:
                 continue
                 
-            if i == 0:
-                # First chunk forms the base metadata
+            # Use the first successful chunk as the master metadata container
+            if master_invoice is None:
                 master_invoice = chunk_invoice
                 all_line_items.extend(chunk_invoice.line_items)
             else:
-                # Subsequent chunks just append line items
                 all_line_items.extend(chunk_invoice.line_items)
                 
         except Exception as e:
             if DEBUG: print(f"  ⚠️ Chunk {i+1} failed: {e}")
-            continue # Try to push through to the next chunk even if one fails
+            continue # Skip bad chunks and push through to the end
             
     if not master_invoice:
         raise ValueError("All chunks failed to extract data. Token limit or API error.")
         
-    # Consolidate
+    # Consolidate everything back together
     master_invoice.line_items = all_line_items
     master_invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
     master_invoice.extraction_metadata.source_file_name = source_file
