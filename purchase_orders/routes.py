@@ -324,7 +324,15 @@ async def link_invoices_to_po(
     async with httpx.AsyncClient(timeout=30.0) as client:
         for invoice_str_id in request.invoice_ids:
             try:
-                invoice_oid = ObjectId(invoice_str_id)
+                # 💥 THE FIX: Smart ID Detection
+                # Store as ObjectId if it's 24-char hex, otherwise keep as string (UUID)
+                if len(invoice_str_id) == 24:
+                    try:
+                        invoice_id_to_store = ObjectId(invoice_str_id)
+                    except:
+                        invoice_id_to_store = invoice_str_id
+                else:
+                    invoice_id_to_store = invoice_str_id
 
                 # 1. Link in ops backend first
                 ops_response = await client.patch(
@@ -343,7 +351,7 @@ async def link_invoices_to_po(
                 # 2. Link in PO backend
                 await db["purchase_orders"].update_one(
                     {"_id": po_oid},
-                    {"$addToSet": {"invoice_ids": invoice_oid}}
+                    {"$addToSet": {"invoice_ids": invoice_id_to_store}}
                 )
                 
                 linked_count += 1
@@ -372,6 +380,75 @@ async def link_invoices_to_po(
         failed=failed,
         invoice_ids=final_ids
     )
+
+
+@router.delete("/{po_id}/unlink-invoices")
+async def unlink_invoices_from_po(
+    po_id: str,
+    request: LinkInvoicesRequest,
+    db=Depends(get_db)
+):
+    """
+    Unlink invoices from a Purchase Order.
+    Updates both PO and ops backend.
+    """
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+
+    unlinked_count = 0
+    failed = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for invoice_str_id in request.invoice_ids:
+            try:
+                # 💥 THE FIX: Smart ID Detection for Unlinking
+                if len(invoice_str_id) == 24:
+                    try:
+                        invoice_id_to_store = ObjectId(invoice_str_id)
+                    except:
+                        invoice_id_to_store = invoice_str_id
+                else:
+                    invoice_id_to_store = invoice_str_id
+
+                # 1. Unlink in ops backend
+                ops_response = await client.patch(
+                    f"{OPS_API_BASE}/invoices/{invoice_str_id}/link-po",
+                    json={"po_id": None}
+                )
+
+                # 2. Unlink in PO backend (even if ops call fails, clean up our side)
+                await db["purchase_orders"].update_one(
+                    {"_id": po_oid},
+                    {"$pull": {"invoice_ids": invoice_id_to_store}}
+                )
+                
+                if ops_response.status_code == 200:
+                    unlinked_count += 1
+                else:
+                    failed.append({
+                        "invoice_id": invoice_str_id,
+                        "reason": "Ops backend update failed"
+                    })
+
+            except Exception as e:
+                failed.append({
+                    "invoice_id": invoice_str_id,
+                    "reason": str(e)
+                })
+
+    return {
+        "po_id": po_id,
+        "unlinked_count": unlinked_count,
+        "failed": failed
+    }
+
+# Keep your get_po_linked_invoices function below this...
 
 
 @router.delete("/{po_id}/unlink-invoices")
