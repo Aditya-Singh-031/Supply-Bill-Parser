@@ -41,15 +41,18 @@ class POExcelImportService:
     """
 
     HEADER_MAP = {
-        "brand": "brand",
-        "code": "part_number",
-        "part number": "part_number",
-        "part no": "part_number",
-        "quantity": "qty_ordered",
-        "qty": "qty_ordered",
-        "mrp": "mrp",
-        "total": "line_total",
-    }
+    "brand":        "brand",
+    "code":         "part_number",
+    "part number":  "part_number",
+    "part no":      "part_number",
+    "quantity":     "qty_ordered",
+    "qty":          "qty_ordered",
+    "rate/mrp":     "mrp",           # NEW — explicit match before "mrp" substring
+    "mrp":          "mrp",
+    "rate":         "mrp",           # NEW — treat standalone rate as mrp field
+    "discount":     "discount_percent",  # NEW — catches "Discount%"
+    "total":        "line_total",
+}
 
     SUMMARY_LABELS = {
         "mrp total": "mrp_total",
@@ -91,7 +94,7 @@ class POExcelImportService:
             qty_col = col_map.get("qty_ordered")
             mrp_col = col_map.get("mrp")
             total_col = col_map.get("line_total")
-
+            disc_col     = col_map.get("discount_percent")
             brand = str(row[brand_col]).strip() if (brand_col is not None and row[brand_col]) else None
             code = str(row[code_col]).strip() if (code_col is not None and row[code_col]) else None
 
@@ -108,12 +111,13 @@ class POExcelImportService:
                     continue
 
                 line_items.append({
-                    "brand": brand or "",
-                    "part_number": code,
-                    "qty_ordered": qty,
-                    "mrp": mrp,
-                    "line_total": total,
-                })
+    "brand":            brand or "",
+    "part_number":      code,
+    "qty_ordered":      qty,
+    "mrp":              mrp,
+    "discount_percent": parse_percent(row[disc_col]) if (disc_col is not None and row[disc_col] is not None) else 0.0,  # NEW
+    "line_total":       total,
+})
 
             except Exception as e:
                 errors.append(f"Row {row_idx}: Error parsing '{code}' — {str(e)}")
