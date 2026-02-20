@@ -76,6 +76,9 @@ async def get_all_operations():
         # Check if line items exist to sum total if missing
         total = doc.get("total_amount", 0)
         
+        # 💥 THE FIX: Extract po_id and convert it to string if it exists
+        po_id_val = str(doc["po_id"]) if doc.get("po_id") else None
+        
         # Build Row
         combined_list.append({
             "id": str(doc["invoice_id"]),
@@ -87,8 +90,9 @@ async def get_all_operations():
             "total_amount": total,
             "status": "completed", # UI will show Green
             "upload_timestamp": doc.get("created_at"),
-            "pdf_url": doc.get("pdf_url"), # /storage/pdfs/filename.pdf
-            "is_temp": False
+            "pdf_url": doc.get("pdf_url"), 
+            "is_temp": False,
+            "po_id": po_id_val # 💥 ADDED THIS LINE
         })
     
     # 3. Sort by Time (Newest First)

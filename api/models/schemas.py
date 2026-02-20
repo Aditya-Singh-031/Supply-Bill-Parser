@@ -22,15 +22,19 @@ class InvoiceBase(BaseModel):
     file_hash: Optional[str] = None # SHA256 Hash of the file
     
     invoice_number: Optional[str] = None
-    invoice_date: Optional[str] = None # Keeping as str to avoid parsing issues for now
+    invoice_date: Optional[str] = None 
     vendor_name: Optional[str] = None
     vendor_gstin: Optional[str] = None
     buyer_name: Optional[str] = None
     buyer_gstin: Optional[str] = None
+    
     po_number: Optional[str] = None
+    po_id: Optional[str] = None  # 💥 ADDED THIS LINE
+    
     total_quantity: Optional[float] = 0.0
     total_amount: Optional[float] = 0.0
     pdf_url: Optional[str] = None
+    # ... rest remains the same
     extraction_status: ExtractionStatus = ExtractionStatus.QUEUED
     extraction_confidence: Optional[float] = None
     error_flag: bool = False
