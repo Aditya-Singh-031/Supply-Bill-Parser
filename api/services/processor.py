@@ -31,7 +31,6 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
     loop = asyncio.get_running_loop()
     with ProcessPoolExecutor(max_workers=min(4, len(file_paths))) as executor:
         futures = [loop.run_in_executor(executor, process_single_pdf_worker, arg) for arg in worker_args]
-        # return_exceptions=True prevents one massive PDF crash from taking down the whole batch
         results = await asyncio.gather(*futures, return_exceptions=True)
 
     # --- C. SAVE & MERGE RESULTS ---
@@ -68,10 +67,12 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     item_count = len(lines)
                     total_amt = sum(l.quantity * l.unit_price for l in lines if l.quantity and l.unit_price)
                     
+                    # 💥 FIX 1: Attach invoice_id for Duplicate files
                     RedisClient.update_pdf_progress(
                         job_id, index, "completed", 100, 
                         f"Duplicate ({item_count} items)", 
-                        line_items=item_count, total_amount=total_amt
+                        line_items=item_count, total_amount=total_amt,
+                        invoice_id=str(existing.invoice_id) 
                     )
                     
                     valid_results.append(data)
@@ -87,22 +88,32 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     
                     await save_to_mongo(db_service, UUID(job_id), f"{job_id}_{res['filename']}", res["data"], res["file_hash"])
                     
+                    # 💥 FIX 2: Fetch the generated invoice_id from the database
+                    saved_doc = await db_service.get_invoice_by_hash(res["file_hash"])
+                    new_invoice_id = str(saved_doc.invoice_id) if saved_doc else None
+
                     raw_items = res["data"].get("line_items", [])
                     item_count = len(raw_items)
                     
                     total_amt = 0.0
                     for item in raw_items:
                         try:
-                            q = float(str(item.get("quantity", 0)).replace(",", ""))
-                            p = float(str(item.get("unit_price", 0)).replace(",", ""))
+                            q_str = str(item.get("quantity", 0)).replace(",", "").replace(" ", "").strip()
+                            p_str = str(item.get("unit_price", 0)).replace(",", "").replace(" ", "").strip()
+                            
+                            q = float(q_str) if q_str else 0.0
+                            p = float(p_str) if p_str else 0.0
+                            
                             total_amt += (q * p)
                         except: pass
 
+                    # 💥 FIX 3: Attach invoice_id for New files
                     RedisClient.update_pdf_progress(
                         job_id, index, "completed", 100, 
                         "Saved", 
                         line_items=item_count, 
-                        total_amount=total_amt
+                        total_amount=total_amt,
+                        invoice_id=new_invoice_id 
                     )
 
                     successful_count += 1
@@ -117,11 +128,8 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     failed_count += 1
                     if os.path.exists(res["temp_path"]): os.remove(res["temp_path"])
         else:
-            # --- FIX: WORKER EXTRACTION FAILED ---
             error_msg = res.get("error", "Extraction failed")
             print(f"❌ Extraction Failed for file {index}: {error_msg}")
-            
-            # Tell Redis it failed so the UI stops hanging!
             RedisClient.update_pdf_progress(job_id, index, "failed", 100, error_msg[:60]) 
             failed_count += 1
             if os.path.exists(res.get("temp_path", "")): os.remove(res.get("temp_path", ""))
