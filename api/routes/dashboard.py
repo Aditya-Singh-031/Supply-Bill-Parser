@@ -11,14 +11,16 @@ async def get_dashboard_stats():
     
     user_count = await db["users"].count_documents({})
     invoice_count = await db["invoices"].count_documents({})
-    
-    # ─── UPDATED: Count strictly from the new dedicated collection ───
     supplier_count = await db["suppliers"].count_documents({})
+    
+    # ─── NEW: Count Purchase Orders ───
+    po_count = await db["purchase_orders"].count_documents({})
     
     return {
         "users": user_count,
         "invoices_parsed": invoice_count,
         "suppliers": supplier_count,
+        "purchase_orders": po_count, # Include it in the response
         "active_jobs": 0 
     }
 
