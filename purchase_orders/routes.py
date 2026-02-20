@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Response
 from datetime import datetime
 from typing import Optional, List
+import httpx
 from bson import ObjectId
 from pydantic import BaseModel, Field, validator
 from enum import Enum
@@ -64,6 +65,22 @@ class CreatePORequest(BaseModel):
 class StatusUpdateRequest(BaseModel):
     status: POStatus
 
+# ─── Invoice Linking Models ──────────────────────────────────
+class LinkInvoicesRequest(BaseModel):
+    invoice_ids: List[str] = Field(..., min_items=1, description="List of invoice _id strings")
+
+class LinkInvoicesResponse(BaseModel):
+    po_id: str
+    linked_count: int
+    failed: List[dict] = []
+    invoice_ids: List[str]  # Final state after linking
+
+class InvoiceSummary(BaseModel):
+    _id: str
+    invoice_number: str
+    supplier_name: str
+    invoice_date: Optional[str] = None
+    total_value: float
 
 # ─── Routes ──────────────────────────────────────────────
 @router.get("")
@@ -275,3 +292,185 @@ async def preview_po_import(file: UploadFile = File(...)):
         "item_count": len(result["line_items"]),
         "warnings": result["errors"],
     }
+# ─────────────────────────────────────────────────────────────────────────────
+# INVOICE LINKING ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+OPS_API_BASE = "http://localhost:8000/api/v1"  # ← Change to your ops backend URL
+
+@router.post("/{po_id}/link-invoices", response_model=LinkInvoicesResponse)
+async def link_invoices_to_po(
+    po_id: str,
+    request: LinkInvoicesRequest,
+    db=Depends(get_db)
+):
+    """
+    Link multiple invoices to a Purchase Order.
+    Updates both PO backend and ops backend.
+    """
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+
+    # Verify PO exists
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+
+    linked_count = 0
+    failed = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for invoice_str_id in request.invoice_ids:
+            try:
+                invoice_oid = ObjectId(invoice_str_id)
+
+                # 1. Link in ops backend first
+                ops_response = await client.patch(
+                    f"{OPS_API_BASE}/invoices/{invoice_str_id}/link-po",
+                    json={"po_id": po_id}
+                )
+                
+                if ops_response.status_code != 200:
+                    error_detail = ops_response.json().get("detail", "Unknown error")
+                    failed.append({
+                        "invoice_id": invoice_str_id,
+                        "reason": error_detail
+                    })
+                    continue
+
+                # 2. Link in PO backend
+                await db["purchase_orders"].update_one(
+                    {"_id": po_oid},
+                    {"$addToSet": {"invoice_ids": invoice_oid}}
+                )
+                
+                linked_count += 1
+
+            except httpx.HTTPError as e:
+                failed.append({
+                    "invoice_id": invoice_str_id,
+                    "reason": f"Network error: {str(e)}"
+                })
+            except Exception as e:
+                failed.append({
+                    "invoice_id": invoice_str_id,
+                    "reason": str(e)
+                })
+
+    # Fetch final state
+    po_final = await db["purchase_orders"].find_one(
+        {"_id": po_oid}, 
+        {"invoice_ids": 1}
+    )
+    final_ids = [str(iid) for iid in po_final.get("invoice_ids", [])]
+
+    return LinkInvoicesResponse(
+        po_id=po_id,
+        linked_count=linked_count,
+        failed=failed,
+        invoice_ids=final_ids
+    )
+
+
+@router.delete("/{po_id}/unlink-invoices")
+async def unlink_invoices_from_po(
+    po_id: str,
+    request: LinkInvoicesRequest,
+    db=Depends(get_db)
+):
+    """
+    Unlink invoices from a Purchase Order.
+    Updates both PO and ops backend.
+    """
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+
+    unlinked_count = 0
+    failed = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for invoice_str_id in request.invoice_ids:
+            try:
+                invoice_oid = ObjectId(invoice_str_id)
+
+                # 1. Unlink in ops backend
+                ops_response = await client.patch(
+                    f"{OPS_API_BASE}/invoices/{invoice_str_id}/link-po",
+                    json={"po_id": None}
+                )
+
+                # 2. Unlink in PO backend (even if ops call fails, clean up our side)
+                await db["purchase_orders"].update_one(
+                    {"_id": po_oid},
+                    {"$pull": {"invoice_ids": invoice_oid}}
+                )
+                
+                if ops_response.status_code == 200:
+                    unlinked_count += 1
+                else:
+                    failed.append({
+                        "invoice_id": invoice_str_id,
+                        "reason": "Ops backend update failed"
+                    })
+
+            except Exception as e:
+                failed.append({
+                    "invoice_id": invoice_str_id,
+                    "reason": str(e)
+                })
+
+    return {
+        "po_id": po_id,
+        "unlinked_count": unlinked_count,
+        "failed": failed
+    }
+
+
+@router.get("/{po_id}/invoices", response_model=List[InvoiceSummary])
+async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
+    """
+    Get all invoices linked to this PO.
+    Proxies to ops backend.
+    """
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{OPS_API_BASE}/invoices",
+                params={"po_id": po_id}
+            )
+            resp.raise_for_status()
+            invoices = resp.json()
+            
+            # Transform to InvoiceSummary format
+            return [
+                InvoiceSummary(
+                    _id=str(inv["_id"]),
+                    invoice_number=inv.get("invoice_number", "N/A"),
+                    supplier_name=inv.get("supplier_name", "Unknown"),
+                    invoice_date=inv.get("invoice_date"),
+                    total_value=inv.get("total_value", 0.0)
+                )
+                for inv in invoices.get("invoices", [])
+            ]
+            
+    except httpx.HTTPError as e:
+        raise HTTPException(500, f"Failed to fetch linked invoices: {str(e)}")
+    except Exception as e:
+        raise HTTPException(500, f"Error processing invoices: {str(e)}")

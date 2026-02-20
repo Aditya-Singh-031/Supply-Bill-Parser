@@ -2,10 +2,13 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse, FileResponse
 from typing import List, Optional
 from uuid import UUID, uuid4
+from bson import ObjectId
+from pydantic import BaseModel
 import os
 import json
 import asyncio
 from datetime import datetime
+
 
 from api.core.redis_client import RedisClient
 from api.core.database import get_database
@@ -15,15 +18,19 @@ from api.models.schemas import (
     LineItemResponse, LineItemUpdate, ExtractionStatus
 )
 
+
 # We will create this in the next step (Step 5)
 from api.services.processor import process_invoices_background
 
+
 router = APIRouter()
+
 
 # Dependency to get database service
 def get_db_service():
     db = get_database()
     return DatabaseService(db)
+
 
 # ============================================
 # 1. UPLOAD & PROCESSING
@@ -41,6 +48,7 @@ async def upload_invoices(
     
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files allowed")
+
 
     # Generate job ID
     job_id = str(uuid4())
@@ -60,8 +68,10 @@ async def upload_invoices(
             f.write(content)
         file_paths.append(file_path)
 
+
     if not file_paths:
         raise HTTPException(status_code=400, detail="No valid PDF files found")
+
 
     # Initialize Redis Job
     job_data = {
@@ -85,15 +95,18 @@ async def upload_invoices(
     
     RedisClient.set_job(job_id, job_data)
 
+
     # Start Background Processing (Fire and Forget)
     # We pass just the ID and paths; the processor will open its own DB connection
     asyncio.create_task(process_invoices_background(job_id, file_paths))
+
 
     return {
         "job_id": job_id,
         "message": f"Processing started for {len(file_paths)} invoices",
         "total_files": len(file_paths)
     }
+
 
 @router.get("/status/{job_id}")
 async def get_job_status(job_id: str):
@@ -129,9 +142,9 @@ async def get_job_status(job_id: str):
             # Check every 1 second for smoother UI animation
             await asyncio.sleep(1)
 
+
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-# ... inside api/routes/invoice.py
 
 @router.get("/download/{job_id}")
 async def download_excel(job_id: str):
@@ -172,6 +185,7 @@ async def download_excel(job_id: str):
         filename=filename
     )
 
+
 # ============================================
 # 2. INVOICE CRUD (MongoDB)
 # ============================================
@@ -180,9 +194,53 @@ async def list_invoices(
     skip: int = 0, 
     limit: int = 50, 
     status: Optional[ExtractionStatus] = None,
+    po_id: Optional[str] = None,
+    linked: Optional[bool] = None,
+    supplier_name: Optional[str] = None,
     db_service: DatabaseService = Depends(get_db_service)
 ):
-    return await db_service.list_invoices(skip, limit, status)
+    """
+    List invoices with filtering.
+    - po_id: filter by linked PO
+    - linked: true (has po_id), false (no po_id), None (all)
+    - supplier_name: partial match
+    - status: extraction status filter
+    """
+    # Build query
+    query = {}
+    
+    if status:
+        query["status"] = status.value
+    
+    if po_id:
+        try:
+            query["po_id"] = ObjectId(po_id)
+        except:
+            raise HTTPException(400, "Invalid PO ID format")
+    
+    if linked is not None:
+        if linked:
+            query["po_id"] = {"$ne": None, "$exists": True}
+        else:
+            query["po_id"] = {"$in": [None, {"$exists": False}]}
+    
+    if supplier_name:
+        query["supplier_name"] = {"$regex": supplier_name, "$options": "i"}
+    
+    # Get database directly for custom query
+    db = get_database()
+    cursor = db["invoices"].find(query).skip(skip).limit(limit).sort("upload_date", -1)
+    
+    invoices = []
+    async for inv in cursor:
+        # Convert ObjectIds to strings
+        inv["_id"] = str(inv["_id"])
+        if inv.get("po_id"):
+            inv["po_id"] = str(inv["po_id"])
+        invoices.append(inv)
+    
+    return invoices
+
 
 @router.get("/{invoice_id}", response_model=InvoiceWithLineItems)
 async def get_invoice(
@@ -193,6 +251,7 @@ async def get_invoice(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     return invoice
+
 
 @router.patch("/{invoice_id}", response_model=InvoiceResponse)
 async def update_invoice(
@@ -206,6 +265,7 @@ async def update_invoice(
         raise HTTPException(status_code=404, detail="Invoice not found")
     return result
 
+
 @router.delete("/{invoice_id}")
 async def delete_invoice(
     invoice_id: UUID,
@@ -215,3 +275,58 @@ async def delete_invoice(
     if not success:
         raise HTTPException(status_code=404, detail="Invoice not found")
     return {"message": "Deleted successfully"}
+
+
+# ============================================
+# 3. PURCHASE ORDER LINKING
+# ============================================
+
+class LinkPORequest(BaseModel):
+    po_id: Optional[str] = None
+
+
+@router.patch("/{invoice_id}/link-po")
+async def link_invoice_to_po(
+    invoice_id: str, 
+    request: LinkPORequest
+):
+    """
+    Link or unlink an invoice to/from a Purchase Order.
+    Set po_id to null to unlink.
+    """
+    db = get_database()
+    
+    try:
+        invoice_oid = ObjectId(invoice_id)
+    except:
+        raise HTTPException(400, "Invalid invoice ID format")
+
+    invoice = await db["invoices"].find_one({"_id": invoice_oid})
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+
+    # Check if already linked to another PO
+    current_po_id = invoice.get("po_id")
+    if current_po_id and request.po_id and str(current_po_id) != request.po_id:
+        raise HTTPException(
+            409, 
+            f"Invoice already linked to PO {str(current_po_id)}. Unlink first or use force=true."
+        )
+
+    # Convert po_id to ObjectId or None
+    po_oid = ObjectId(request.po_id) if request.po_id else None
+
+    # Update invoice
+    await db["invoices"].update_one(
+        {"_id": invoice_oid},
+        {
+            "$set": {"po_id": po_oid},
+            "$currentDate": {"updated_at": True}
+        }
+    )
+
+    return {
+        "message": "Invoice PO link updated",
+        "invoice_id": invoice_id,
+        "po_id": request.po_id
+    }
