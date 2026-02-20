@@ -100,6 +100,11 @@ async def get_job_status(job_id: str):
     """Server-Sent Events for real-time progress"""
     async def event_stream():
         last_update = None
+        
+        # Nginx Buffer Flush Hack: 4KB of invisible whitespace
+        # This forces Nginx to instantly push the progress to the UI
+        flush_padding = " " * 4096 
+        
         while True:
             job_data = RedisClient.get_job(job_id)
             
@@ -109,18 +114,20 @@ async def get_job_status(job_id: str):
             
             # Only send data if it changed
             if job_data != last_update:
-                yield f"event: progress\ndata: {json.dumps(job_data)}\n\n"
+                # Yield data + padding to force proxy flush
+                yield f"event: progress\ndata: {json.dumps(job_data)}\n:{flush_padding}\n\n"
                 last_update = job_data
                 
-                # Check completion inside this block so we don't break early
+                # Check completion inside this block
                 if job_data.get("status") in ["completed", "failed"]:
-                    yield f"event: complete\ndata: {json.dumps(job_data)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps(job_data)}\n:{flush_padding}\n\n"
                     break
             else:
-                # 💥 THE FIX: Send a heartbeat ping every 2 seconds to keep Nginx alive
-                yield ": keep-alive\n\n"
+                # Keep-alive with padding to prevent Nginx timeout
+                yield f": keep-alive {flush_padding}\n\n"
             
-            await asyncio.sleep(2)
+            # Check every 1 second for smoother UI animation
+            await asyncio.sleep(1)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
