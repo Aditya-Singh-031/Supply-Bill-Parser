@@ -111,13 +111,13 @@ class POExcelImportService:
                     continue
 
                 line_items.append({
-    "brand":            brand or "",
-    "part_number":      code,
-    "qty_ordered":      qty,
-    "mrp":              mrp,
-    "discount_percent": parse_percent(row[disc_col]) if (disc_col is not None and row[disc_col] is not None) else 0.0,  # NEW
-    "line_total":       total,
-})
+                    "brand":            brand or "",
+                    "part_number":      code,
+                    "qty_ordered":      qty,
+                    "mrp":              mrp,
+                    "discount_percent": parse_percent(row[disc_col]) if (disc_col is not None and row[disc_col] is not None) else 0.0,  # NEW
+                    "line_total":       total,
+                })
 
             except Exception as e:
                 errors.append(f"Row {row_idx}: Error parsing '{code}' — {str(e)}")
