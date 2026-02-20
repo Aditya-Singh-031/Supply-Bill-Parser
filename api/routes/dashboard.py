@@ -1,67 +1,87 @@
 from fastapi import APIRouter
+from datetime import datetime
 from api.core.database import get_database
 
 router = APIRouter()
 
 @router.get("/stats")
 async def get_dashboard_stats():
-    """
-    Fetch real-time statistics from MongoDB.
-    """
+    """Fetch real-time statistics from MongoDB."""
     db = get_database()
     
-    # 1. Count Users (Real DB Count)
     user_count = await db["users"].count_documents({})
-    
-    # 2. Count Invoices (Real DB Count)
     invoice_count = await db["invoices"].count_documents({})
     
-    # 3. Count Unique Suppliers
-    # We use MongoDB's distinct() to get unique vendor names instantly
-    unique_suppliers_list = await db["invoices"].distinct("vendor_name")
-    # Filter out empty/null names
-    valid_suppliers = [s for s in unique_suppliers_list if s]
+    # ─── UPDATED: Count strictly from the new dedicated collection ───
+    supplier_count = await db["suppliers"].count_documents({})
     
     return {
         "users": user_count,
         "invoices_parsed": invoice_count,
-        "suppliers": len(valid_suppliers),
+        "suppliers": supplier_count,
         "active_jobs": 0 
     }
 
 @router.get("/suppliers")
 async def get_suppliers():
     """
-    Fetch distinct supplier list with invoice counts from MongoDB.
+    1. Auto-syncs new vendors from invoices into the suppliers collection.
+    2. Fetches the dedicated suppliers list joined with their invoice counts.
     """
     db = get_database()
     
-    # Aggregation Pipeline: Group by Vendor Name -> Count Invoices
+    # --- 1. AUTO-SYNC LOGIC ---
+    # Find all unique vendors from parsed invoices
     pipeline = [
+        {"$match": { "vendor_name": { "$ne": None } }},
+        {"$group": {"_id": "$vendor_name", "gstin": {"$first": "$vendor_gstin"}}}
+    ]
+    
+    async for doc in db["invoices"].aggregate(pipeline):
+        vendor_name = doc["_id"]
+        if vendor_name:
+            # Check if this vendor is already in our dedicated collection
+            exists = await db["suppliers"].find_one({"supp_name": vendor_name})
+            
+            # If not, create a shell record for them automatically!
+            if not exists:
+                await db["suppliers"].insert_one({
+                    "supp_name": vendor_name,
+                    "gstin": doc.get("gstin") or "",
+                    "address": {"address_lines": "", "city": ""},
+                    "brands": [],
+                    "contact": {"name": "", "email": "", "phone": ""},
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                })
+
+    # --- 2. FETCH DATA FOR UI ---
+    # We aggregate from the dedicated 'suppliers' collection and lookup invoice count
+    agg_pipeline = [
         {
-            "$match": { "vendor_name": { "$ne": None } } # Exclude null vendors
-        },
-        {
-            "$group": {
-                "_id": "$vendor_name",
-                "invoice_count": {"$sum": 1},
-                "gstin": {"$first": "$vendor_gstin"},
-                "last_active": {"$max": "$created_at"}
+            "$lookup": {
+                "from": "invoices",
+                "localField": "supp_name",
+                "foreignField": "vendor_name",
+                "as": "invoice_docs"
             }
         },
-        {"$sort": {"invoice_count": -1}} # Sort by most frequent
+        {
+            "$project": {
+                "id": {"$toString": "$_id"},  # Crucial for frontend editing
+                "name": "$supp_name",
+                "gstin": "$gstin",
+                "invoice_count": {"$size": "$invoice_docs"},
+                "last_active": "$updated_at"
+            }
+        },
+        {"$sort": {"invoice_count": -1}}
     ]
     
     results = []
-    async for doc in db["invoices"].aggregate(pipeline):
-        if doc["_id"]: 
-            results.append({
-                "name": doc["_id"],
-                "gstin": doc.get("gstin", "N/A"),
-                "invoice_count": doc["invoice_count"],
-                "last_active": doc.get("last_active")
-            })
-            
+    async for doc in db["suppliers"].aggregate(agg_pipeline):
+        results.append(doc)
+        
     return results
 
 @router.get("/recent-activity")
