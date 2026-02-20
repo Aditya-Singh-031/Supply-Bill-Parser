@@ -57,6 +57,8 @@ async def get_suppliers():
 
     # --- 2. FETCH DATA FOR UI ---
     # We aggregate from the dedicated 'suppliers' collection and lookup invoice count
+    # --- 2. FETCH DATA FOR UI ---
+    # We aggregate from the dedicated 'suppliers' collection and lookup invoice count
     agg_pipeline = [
         {
             "$lookup": {
@@ -68,7 +70,8 @@ async def get_suppliers():
         },
         {
             "$project": {
-                "id": {"$toString": "$_id"},  # Crucial for frontend editing
+                "_id": 0, # 💥 THE FIX: Explicitly remove the raw un-serializable ObjectId
+                "id": {"$toString": "$_id"},  # We keep the string version for the frontend
                 "name": "$supp_name",
                 "gstin": "$gstin",
                 "invoice_count": {"$size": "$invoice_docs"},
