@@ -276,7 +276,6 @@ async def delete_invoice(
         raise HTTPException(status_code=404, detail="Invoice not found")
     return {"message": "Deleted successfully"}
 
-
 # ============================================
 # 3. PURCHASE ORDER LINKING
 # ============================================
@@ -296,14 +295,24 @@ async def link_invoice_to_po(
     """
     db = get_database()
     
-    try:
-        invoice_oid = ObjectId(invoice_id)
-    except:
-        raise HTTPException(400, "Invalid invoice ID format")
+    # 💥 THE FIX: Smart ID Detection for the Ops Backend
+    if len(invoice_id) == 24:
+        try:
+            query = {"_id": ObjectId(invoice_id)}
+        except:
+            raise HTTPException(400, "Invalid invoice ID format")
+    else:
+        try:
+            query = {"$or": [{"invoice_id": invoice_id}, {"invoice_id": UUID(invoice_id)}]}
+        except ValueError:
+            query = {"invoice_id": invoice_id}
 
-    invoice = await db["invoices"].find_one({"_id": invoice_oid})
+    # Find the invoice using the smart query
+    invoice = await db["invoices"].find_one(query)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
+        
+    inv_oid = invoice["_id"] # Get actual MongoDB ObjectId
 
     # Check if already linked to another PO
     current_po_id = invoice.get("po_id")
@@ -318,7 +327,7 @@ async def link_invoice_to_po(
 
     # Update invoice
     await db["invoices"].update_one(
-        {"_id": invoice_oid},
+        {"_id": inv_oid},
         {
             "$set": {"po_id": po_oid},
             "$currentDate": {"updated_at": True}
