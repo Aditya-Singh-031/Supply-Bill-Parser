@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from typing import List, Optional
 from uuid import UUID, uuid4
 from bson import ObjectId
@@ -329,4 +329,99 @@ async def link_invoice_to_po(
         "message": "Invoice PO link updated",
         "invoice_id": invoice_id,
         "po_id": request.po_id
+    }
+
+# ============================================
+# 4. BULK PURCHASE ORDER LINKING (From Dialog)
+# ============================================
+
+class BulkLinkRequest(BaseModel):
+    invoice_ids: List[str]
+
+@router.post("/purchase-orders/{po_id}/link-invoices")
+async def bulk_link_invoices_to_po(
+    po_id: str,
+    request: BulkLinkRequest
+):
+    """
+    Called by the LinkToPODialog.
+    Takes a list of invoice IDs and links them all to the specified PO.
+    """
+    db = get_database()
+    
+    # 1. Validate PO exists
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+        
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+
+    # 2. Process each invoice
+    linked_count = 0
+    failed_links = []
+    
+    for inv_id in request.invoice_ids:
+        try:
+            inv_oid = ObjectId(inv_id)
+            
+            # Check if invoice exists and isn't already linked to a DIFFERENT PO
+            invoice = await db["invoices"].find_one({"_id": inv_oid})
+            if not invoice:
+                failed_links.append({"invoice_id": inv_id, "reason": "Invoice not found"})
+                continue
+                
+            current_po = invoice.get("po_id")
+            if current_po and str(current_po) != po_id:
+                failed_links.append({"invoice_id": inv_id, "reason": f"Already linked to PO {str(current_po)}"})
+                continue
+                
+            # Update the Invoice document (Operations Backend)
+            await db["invoices"].update_one(
+                {"_id": inv_oid},
+                {
+                    "$set": {"po_id": po_oid},
+                    "$currentDate": {"updated_at": True}
+                }
+            )
+            
+            linked_count += 1
+            
+        except Exception as e:
+            failed_links.append({"invoice_id": inv_id, "reason": str(e)})
+
+    # 3. Update the PO document (PO Backend)
+    # Add all successfully linked invoice IDs to the PO's invoice_ids array
+    if linked_count > 0:
+        # Convert strings to ObjectIds for the PO array
+        successful_oids = [ObjectId(inv_id) for inv_id in request.invoice_ids 
+                           if inv_id not in [f["invoice_id"] for f in failed_links]]
+                           
+        await db["purchase_orders"].update_one(
+            {"_id": po_oid},
+            {
+                "$addToSet": {"invoice_ids": {"$each": successful_oids}},
+                "$currentDate": {"updated_at": True}
+            }
+        )
+
+    # 4. Return results
+    if len(failed_links) == len(request.invoice_ids):
+        # Everything failed
+        return JSONResponse(
+            status_code=400,
+            content={
+                "message": "Failed to link invoices",
+                "linked_count": 0,
+                "failed": failed_links
+            }
+        )
+        
+    return {
+        "message": f"Successfully linked {linked_count} invoices",
+        "linked_count": linked_count,
+        "po_id": po_id,
+        "failed": failed_links
     }
