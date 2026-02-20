@@ -295,17 +295,14 @@ async def link_invoice_to_po(
     """
     db = get_database()
     
-    # 💥 THE FIX: Smart ID Detection for the Ops Backend
+    # 💥 THE FIX: Just use the string directly if it's not a 24-char hex
     if len(invoice_id) == 24:
         try:
             query = {"_id": ObjectId(invoice_id)}
         except:
             raise HTTPException(400, "Invalid invoice ID format")
     else:
-        try:
-            query = {"$or": [{"invoice_id": invoice_id}, {"invoice_id": UUID(invoice_id)}]}
-        except ValueError:
-            query = {"invoice_id": invoice_id}
+        query = {"invoice_id": invoice_id} # <-- Removed UUID() casting
 
     # Find the invoice using the smart query
     invoice = await db["invoices"].find_one(query)
@@ -313,6 +310,8 @@ async def link_invoice_to_po(
         raise HTTPException(404, "Invoice not found")
         
     inv_oid = invoice["_id"] # Get actual MongoDB ObjectId
+
+    # ... [keep the rest of the function the same] ...
 
     # Check if already linked to another PO
     current_po_id = invoice.get("po_id")
@@ -374,11 +373,7 @@ async def bulk_link_invoices_to_po(
             if len(inv_id) == 24:
                 query = {"_id": ObjectId(inv_id)}
             else:
-                try:
-                    # Check both string and native UUID format
-                    query = {"$or": [{"invoice_id": inv_id}, {"invoice_id": UUID(inv_id)}]}
-                except ValueError:
-                    query = {"invoice_id": inv_id}
+                query = {"invoice_id": inv_id} # <-- Removed UUID() casting
             
             # Find Invoice
             invoice = await db["invoices"].find_one(query)
@@ -387,6 +382,8 @@ async def bulk_link_invoices_to_po(
                 continue
                 
             inv_oid = invoice["_id"]
+            
+            # ... [keep the rest of the function the same] ...
                 
             # Check if already linked
             current_po = invoice.get("po_id")
