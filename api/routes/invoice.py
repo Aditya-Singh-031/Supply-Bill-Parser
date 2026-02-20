@@ -362,43 +362,53 @@ async def bulk_link_invoices_to_po(
     # 2. Process each invoice
     linked_count = 0
     failed_links = []
+    successful_oids = [] # Keep track of actual ObjectIds for the PO document
     
     for inv_id in request.invoice_ids:
         try:
-            inv_oid = ObjectId(inv_id)
-            
-            # Check if invoice exists and isn't already linked to a DIFFERENT PO
-            invoice = await db["invoices"].find_one({"_id": inv_oid})
-            if not invoice:
-                failed_links.append({"invoice_id": inv_id, "reason": "Invoice not found"})
-                continue
-                
-            current_po = invoice.get("po_id")
-            if current_po and str(current_po) != po_id:
-                failed_links.append({"invoice_id": inv_id, "reason": f"Already linked to PO {str(current_po)}"})
-                continue
-                
-            # Update the Invoice document (Operations Backend)
-            await db["invoices"].update_one(
-                {"_id": inv_oid},
-                {
-                    "$set": {"po_id": po_oid},
-                    "$currentDate": {"updated_at": True}
-                }
-            )
-            
-            linked_count += 1
-            
+            # 💥 THE FIX: Smart ID Detection
+            # If it's a 24-character hex string (coming from the Operations Table)
+            if len(inv_id) == 24:
+                query = {"_id": ObjectId(inv_id)}
+            else:
+                # Otherwise, it's a UUID (coming from the Supply Bill Parser upload)
+                # We check both string format and native UUID object format
+                query = {"$or": [
+                    {"invoice_id": inv_id}, 
+                    {"invoice_id": UUID(inv_id)}
+                ]}
         except Exception as e:
-            failed_links.append({"invoice_id": inv_id, "reason": str(e)})
+            failed_links.append({"invoice_id": inv_id, "reason": "Invalid ID format"})
+            continue
+            
+        # Check if invoice exists
+        invoice = await db["invoices"].find_one(query)
+        if not invoice:
+            failed_links.append({"invoice_id": inv_id, "reason": "Invoice not found in database"})
+            continue
+            
+        inv_oid = invoice["_id"] # Get the actual MongoDB ObjectId
+            
+        current_po = invoice.get("po_id")
+        if current_po and str(current_po) != po_id:
+            failed_links.append({"invoice_id": inv_id, "reason": f"Already linked to PO {str(current_po)}"})
+            continue
+            
+        # Update the Invoice document (Operations Backend)
+        await db["invoices"].update_one(
+            {"_id": inv_oid},
+            {
+                "$set": {"po_id": po_oid},
+                "$currentDate": {"updated_at": True}
+            }
+        )
+        
+        successful_oids.append(inv_oid)
+        linked_count += 1
 
     # 3. Update the PO document (PO Backend)
-    # Add all successfully linked invoice IDs to the PO's invoice_ids array
-    if linked_count > 0:
-        # Convert strings to ObjectIds for the PO array
-        successful_oids = [ObjectId(inv_id) for inv_id in request.invoice_ids 
-                           if inv_id not in [f["invoice_id"] for f in failed_links]]
-                           
+    # Add all successfully linked invoice ObjectIds to the PO
+    if successful_oids:
         await db["purchase_orders"].update_one(
             {"_id": po_oid},
             {
@@ -409,7 +419,6 @@ async def bulk_link_invoices_to_po(
 
     # 4. Return results
     if len(failed_links) == len(request.invoice_ids):
-        # Everything failed
         return JSONResponse(
             status_code=400,
             content={
