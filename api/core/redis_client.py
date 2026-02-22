@@ -53,7 +53,7 @@ class RedisClient:
         return None
 
     @classmethod
-    def update_pdf_progress(cls, job_id, pdf_index, status, progress, message, line_items=0, total_amount=0.0):
+    def update_pdf_progress(cls, job_id, pdf_index, status, progress, message, line_items=0, total_amount=0.0, invoice_id=None):
         """Atomic update for a specific PDF within a job"""
         job_data = cls.get_job(job_id)
         if not job_data:
@@ -72,6 +72,9 @@ class RedisClient:
             if status == "completed":
                 job_data["pdfs"][str(pdf_index)]["line_items"] = int(line_items)
                 job_data["pdfs"][str(pdf_index)]["total_amount"] = float(total_amount)
+                # 💥 FIX: Store the invoice ID in Redis so the UI can use it for linking!
+                if invoice_id:
+                    job_data["pdfs"][str(pdf_index)]["invoice_id"] = invoice_id
 
         # 2. Update Overall Job Stats
         pdfs = job_data["pdfs"].values()
@@ -80,11 +83,9 @@ class RedisClient:
         completed = sum(1 for p in pdfs if p["status"] == "completed")
         failed = sum(1 for p in pdfs if p["status"] == "failed")
         
-        # --- THE FIX: CALCULATE AGGREGATES ---
-        # Sum up all line items and amounts from all PDFs in this job
+        # Calculate Aggregates
         job_total_items = sum(int(p.get("line_items", 0)) for p in pdfs)
         job_total_amount = sum(float(p.get("total_amount", 0.0)) for p in pdfs)
-        # -------------------------------------
         
         # Calculate progress %
         total_progress = sum(p["progress"] for p in pdfs)
