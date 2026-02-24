@@ -379,7 +379,13 @@ async def preview_po_import(file: UploadFile = File(...)):
 # INVOICE LINKING ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-OPS_API_BASE = "http://localhost:8000/api/v1"  # ← Change to your ops backend URL
+# ─────────────────────────────────────────────────────────────────────────────
+# INVOICE LINKING ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 💥 THE FIX: Change localhost to the name of your ops backend container, 
+# OR use the full public URL so it routes correctly.
+OPS_API_BASE = "https://bills-parser.morsebiz.com/api/v1"  # ← Change to your ops backend URL
 
 @router.post("/{po_id}/link-invoices", response_model=LinkInvoicesResponse)
 async def link_invoices_to_po(
