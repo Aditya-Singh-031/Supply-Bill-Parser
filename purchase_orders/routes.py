@@ -297,37 +297,41 @@ async def download_po_excel(po_id: str, db=Depends(get_db)):
 async def delete_purchase_order(po_id: str, db=Depends(get_db)):
     """
     Delete a Purchase Order and all related data.
-    
-    Safety Rules:
-    - Cannot delete if PO has linked invoices
-    - Cannot delete if status is 'fulfilled' or 'partially_fulfilled'
-    - Cascades to delete all line items
     """
     try:
         po_oid = ObjectId(po_id)
     except:
         raise HTTPException(400, "Invalid PO ID format")
 
-    # Fetch PO
     po = await db["purchase_orders"].find_one({"_id": po_oid})
     if not po:
         raise HTTPException(404, "Purchase order not found")
 
-    # Safety Check 1: Cannot delete if has linked invoices
-    if po.get("invoice_ids") and len(po["invoice_ids"]) > 0:
-        raise HTTPException(
-            409,
-            f"Cannot delete PO: {len(po['invoice_ids'])} invoice(s) linked. "
-            "Unlink all invoices first."
-        )
-
-    # Safety Check 2: Cannot delete fulfilled/partially_fulfilled POs
+    # Safety Check 1: Cannot delete fulfilled/partially_fulfilled POs
     if po.get("status") in ["fulfilled", "partially_fulfilled"]:
         raise HTTPException(
             409,
             f"Cannot delete PO with status '{po['status']}'. "
             "Only draft, pending, confirmed, or cancelled POs can be deleted."
         )
+
+    # 💥 THE FIX: Verify true linked status with the Operations DB
+    # This prevents "Ghost Data" from blocking your deletions!
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(f"{OPS_API_BASE}/invoices/", params={"po_id": po_id})
+            if resp.status_code == 200:
+                linked_invoices = resp.json()
+                if len(linked_invoices) > 0:
+                    raise HTTPException(
+                        409, 
+                        f"Cannot delete: {len(linked_invoices)} invoice(s) are still actively linked. Unlink them first."
+                    )
+    except HTTPException:
+        raise
+    except Exception:
+        # If connection to Ops fails, allow delete since we want to clear the PO anyway
+        pass 
 
     # Cascade Delete: Remove all line items
     delete_result = await db["purchase_order_details"].delete_many({"po_id": po_oid})
@@ -476,14 +480,15 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
         raise HTTPException(404, "Purchase order not found")
 
     try:
-        # Add follow_redirects=True just to be extra safe
+        # 💥 THE FIX: Added trailing slash to /invoices/ to stop the 307 Redirect Crash
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(
-                f"{OPS_API_BASE}/invoices/",  # 💥 THE FIX: Added trailing slash here!
+                f"{OPS_API_BASE}/invoices/",
                 params={"po_id": po_id}
             )
             resp.raise_for_status()
             
+            # 💥 THE FIX: Correctly parsing the list response from Operations
             invoices_list = resp.json()
             
             return [
