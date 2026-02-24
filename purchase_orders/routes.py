@@ -476,24 +476,22 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
         raise HTTPException(404, "Purchase order not found")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # Add follow_redirects=True just to be extra safe
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(
-                f"{OPS_API_BASE}/invoices",
+                f"{OPS_API_BASE}/invoices/",  # 💥 THE FIX: Added trailing slash here!
                 params={"po_id": po_id}
             )
             resp.raise_for_status()
             
-            # 💥 THE FIX: The response is already a list, so we just iterate over it directly!
             invoices_list = resp.json()
             
-            # Transform to the format the UI expects
             return [
                 {
                     "_id": str(inv["_id"]),
                     "invoice_number": inv.get("invoice_number", "N/A"),
                     "supplier_name": inv.get("supplier_name", "Unknown"),
                     "invoice_date": inv.get("invoice_date"),
-                    # Note: Ops backend uses "total_amount", but UI mapped it to "total_value"
                     "total_value": inv.get("total_amount", 0.0) 
                 }
                 for inv in invoices_list
