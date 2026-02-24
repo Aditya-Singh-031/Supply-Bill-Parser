@@ -486,7 +486,6 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
         raise HTTPException(404, "Purchase order not found")
 
     try:
-        # 💥 THE FIX: Added trailing slash to /invoices/ to stop the 307 Redirect Crash
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(
                 f"{OPS_API_BASE}/invoices/",
@@ -494,21 +493,32 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
             )
             resp.raise_for_status()
             
-            # 💥 THE FIX: Correctly parsing the list response from Operations
-            invoices_list = resp.json()
+            raw_data = resp.json()
             
+            # 💥 THE FIX: Indestructible extraction logic
+            # Handle if it's a direct list OR a dictionary with a key like "invoices", "data", "items" etc.
+            if isinstance(raw_data, list):
+                invoices_list = raw_data
+            elif isinstance(raw_data, dict):
+                # Try common wrapper keys, default to empty list if none match
+                invoices_list = raw_data.get("invoices") or raw_data.get("data") or raw_data.get("items") or []
+            else:
+                invoices_list = []
+            
+            # Now safely map the data
             return [
                 {
-                    "_id": str(inv["_id"]),
+                    "_id": str(inv.get("_id", "")),
                     "invoice_number": inv.get("invoice_number", "N/A"),
-                    "supplier_name": inv.get("supplier_name", "Unknown"),
+                    "supplier_name": inv.get("vendor_name", inv.get("supplier_name", "Unknown")), # Check both vendor_name and supplier_name
                     "invoice_date": inv.get("invoice_date"),
-                    "total_value": inv.get("total_amount", 0.0) 
+                    "total_value": inv.get("total_amount", inv.get("total_value", 0.0)) # Check both amount and value
                 }
-                for inv in invoices_list
+                for inv in invoices_list if isinstance(inv, dict) # Ensure item is a dictionary before extracting
             ]
             
     except httpx.HTTPError as e:
         raise HTTPException(500, f"Failed to fetch linked invoices: {str(e)}")
     except Exception as e:
+        print(f"Error parsing invoice list: {e}") # Print the actual error to your terminal
         raise HTTPException(500, f"Error processing invoices: {str(e)}")
