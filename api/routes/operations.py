@@ -26,43 +26,40 @@ async def get_all_operations():
     combined_list = []
     
     # 1. FETCH ACTIVE JOBS (REDIS) - The "Parsing" ones
-    # We scan for active jobs to show them immediately
     try:
         redis = RedisClient.get_client()
         if redis:
-            # Find all job keys
             job_keys = redis.keys("job:*")
             for key in job_keys:
                 job_data = json.loads(redis.get(key))
-                # --- NEW: GHOST CHECK ---
-                # If job started > 1 hour ago and is not complete, ignore it
                 started_at = job_data.get("started_at")
                 if started_at:
                     try:
                         start_dt = datetime.fromisoformat(started_at)
                         if datetime.utcnow() - start_dt > timedelta(hours=1):
-                            continue # Skip stale job
+                            continue 
                     except: pass
-                # We only care about jobs that are NOT fully complete yet
-                # or strictly, we look at individual files inside the job
+                
                 pdfs = job_data.get("pdfs", {})
                 job_id = job_data.get("job_id")
                 
                 for idx, pdf in pdfs.items():
-                    # If this specific file is NOT completed, show it as 'Parsing'
-                    # If it IS completed, it's likely already in MongoDB, so skip to avoid duplicate
                     if pdf.get("status") != "completed":
                         combined_list.append({
-                            "id": f"temp_{job_id}_{idx}", # Temp ID
+                            "id": f"temp_{job_id}_{idx}",
                             "invoice_id": None,
                             "filename": pdf.get("filename"),
                             "vendor_name": "Scanning...",
                             "invoice_number": "---",
                             "invoice_date": "---",
+                            # 💥 NEW: Default zero values for temp files
                             "total_amount": 0,
-                            "status": "parsing", # UI will show yellow/blue
+                            "total_cost": 0,
+                            "total_discount": 0,
+                            "total_with_gst": 0,
+                            "status": "parsing", 
                             "upload_timestamp": pdf.get("updated_at") or job_data.get("started_at"),
-                            "pdf_url": None, # Can't view yet
+                            "pdf_url": None,
                             "is_temp": True
                         })
     except Exception as e:
@@ -70,33 +67,58 @@ async def get_all_operations():
 
     # 2. FETCH SAVED INVOICES (MONGODB) - The "Parsed" ones
     db = get_database()
-    cursor = db.invoices.find().sort("created_at", -1).limit(200) # Limit 200 for speed
+    cursor = db.invoices.find().sort("created_at", -1).limit(200) 
     
     async for doc in cursor:
-        # Check if line items exist to sum total if missing
-        total = doc.get("total_amount", 0)
-        
-        # 💥 THE FIX: Extract po_id and convert it to string if it exists
         po_id_val = str(doc["po_id"]) if doc.get("po_id") else None
+        invoice_id_str = str(doc["invoice_id"])
         
-        # Build Row
+        # 💥 THE FIX: Fetch line items to dynamically calculate exact totals
+        lines_cursor = db.invoice_line_items.find({"invoice_id": invoice_id_str})
+        
+        calc_total_mrp = 0.0
+        calc_total_cost = 0.0
+        calc_total_with_gst = 0.0
+        
+        async for item in lines_cursor:
+            qty = float(item.get("quantity") or 0)
+            price = float(item.get("unit_price") or 0)
+            disc_pct = float(item.get("discount_percent") or 0)
+            igst = float(item.get("igst_rate") or 0)
+            
+            # Math execution
+            disc_rate = price * (1 - (disc_pct / 100))
+            line_cost = disc_rate * qty
+            line_with_gst = line_cost * (1 + (igst / 100))
+            
+            calc_total_mrp += (price * qty)
+            calc_total_cost += line_cost
+            calc_total_with_gst += line_with_gst
+            
+        total_discount = calc_total_mrp - calc_total_cost
+        
+        # Fallback to doc total if no lines exist
+        final_total_with_gst = calc_total_with_gst if calc_total_with_gst > 0 else doc.get("total_amount", 0)
+        
         combined_list.append({
-            "id": str(doc["invoice_id"]),
-            "invoice_id": str(doc["invoice_id"]),
+            "id": invoice_id_str,
+            "invoice_id": invoice_id_str,
             "filename": os.path.basename(doc.get("pdf_url", "")),
             "vendor_name": doc.get("vendor_name") or "Unknown",
             "invoice_number": doc.get("invoice_number") or "N/A",
             "invoice_date": doc.get("invoice_date") or "N/A",
-            "total_amount": total,
-            "status": "completed", # UI will show Green
+            # 💥 NEW: Send granular totals to the UI
+            "total_amount": calc_total_mrp,
+            "total_cost": calc_total_cost,
+            "total_discount": total_discount,
+            "total_with_gst": final_total_with_gst,
+            "status": "completed",
             "upload_timestamp": doc.get("created_at"),
             "pdf_url": doc.get("pdf_url"), 
             "is_temp": False,
-            "po_id": po_id_val # 💥 ADDED THIS LINE
+            "po_id": po_id_val 
         })
     
-    # 3. Sort by Time (Newest First)
-    # Handle mixed string/datetime objects safely
     def parse_time(t):
         if not t: return datetime.min
         if isinstance(t, str):
@@ -105,7 +127,6 @@ async def get_all_operations():
         return t
 
     combined_list.sort(key=lambda x: parse_time(x["upload_timestamp"]), reverse=True)
-    
     return combined_list
 
 
@@ -116,23 +137,19 @@ async def export_selected_invoices(request: BulkExportRequest):
     """
     db = get_database()
     
-    # 1. Fetch Selected Data
     ids = request.invoice_ids
     cursor = db.invoices.find({"invoice_id": {"$in": ids}})
     
     docs = []
     async for doc in cursor:
-        # We need line items for the export
         lines_cursor = db.invoice_line_items.find({"invoice_id": str(doc["invoice_id"])})
         lines = [l async for l in lines_cursor]
-        
         doc["line_items"] = lines
         docs.append(doc)
 
     if not docs:
         raise HTTPException(status_code=404, detail="No data found for selected IDs")
 
-    # 2. Generate Excel Data
     flattened_data = []
     for invoice in docs:
         base_row = {
@@ -150,18 +167,39 @@ async def export_selected_invoices(request: BulkExportRequest):
             flattened_data.append(row)
         
         for item in items:
+            # 💥 THE FIX: Extract variables for advanced Excel calculations
+            qty = float(item.get("quantity") or 0)
+            price = float(item.get("unit_price") or 0)
+            disc_pct = float(item.get("discount_percent") or 0)
+            igst_rate = float(item.get("igst_rate") or 0)
+            
+            # 💥 Execute Math formulas
+            disc_rate = price * (1 - (disc_pct / 100))
+            total_cost = disc_rate * qty
+            
+            # Map GST (IGST acts as the total tax rate, so CGST/SGST are half of it)
+            cgst_rate = igst_rate / 2
+            sgst_rate = igst_rate / 2
+            total_with_gst = total_cost * (1 + (igst_rate / 100))
+
             row = base_row.copy()
             row.update({
                 "Part Number": item.get("part_number"),
                 "Description": item.get("description"),
                 "HSN": item.get("hsn_code"),
-                "Quantity": item.get("quantity"),
-                "Unit Price": item.get("unit_price"),
-                "Total": (float(item.get("quantity") or 0) * float(item.get("unit_price") or 0))
+                "Quantity": qty,
+                "Unit Price": price,
+                # 💥 NEW: Formatted Excel Columns
+                "Discount %": disc_pct,
+                "Discounted Rate": round(disc_rate, 2),
+                "Total Cost": round(total_cost, 2),
+                "CGST %": cgst_rate,
+                "SGST %": sgst_rate,
+                "IGST %": igst_rate,
+                "Total with GST": round(total_with_gst, 2)
             })
             flattened_data.append(row)
 
-    # 3. Save File
     filename = f"Bulk_Export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
     os.makedirs(BILLS_EXCEL_DIR, exist_ok=True)
     file_path = os.path.join(BILLS_EXCEL_DIR, filename)
