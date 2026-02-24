@@ -119,10 +119,52 @@ async def create_purchase_order(request: CreatePORequest, db=Depends(get_db)):
     if existing:
         raise HTTPException(400, f"PO number '{po_data.po_number}' already exists")
 
-    mrp_total = round(sum(i.qty_ordered * i.mrp for i in line_items), 2)
-    final_amount = round(mrp_total * (1 - po_data.discount_percent / 100), 2)
-    advance_amount = round(final_amount * po_data.advance_percent / 100, 2)
     now = datetime.utcnow()
+
+    # 💥 THE FIX: Calculate true totals from the ground up based on line items
+    calculated_mrp_total = 0.0
+    calculated_final_amount = 0.0
+
+    line_docs = []
+    for idx, item in enumerate(line_items):
+        # Fallback to PO-level discount if item doesn't have one
+        item_discount = item.discount_percent if item.discount_percent is not None else po_data.discount_percent
+        
+        # Calculate item line total based on pricing mode
+        if po_data.pricing_mode == PricingMode.MRP:
+            item_final_price = item.mrp * (1 - item_discount / 100)
+        else:
+            item_final_price = item.rate * (1 - item_discount / 100)
+            
+        line_total = round(item.qty_ordered * item_final_price, 2)
+        
+        calculated_mrp_total += (item.qty_ordered * item.mrp)
+        calculated_final_amount += line_total
+
+        line_docs.append({
+            "product_id": ObjectId(item.product_id) if item.product_id else None,
+            "part_number": item.part_number,
+            "brand": item.brand,
+            "sl_number": idx + 1,
+            "qty_ordered": item.qty_ordered,
+            "qty_fulfilled": 0.0,
+            "mrp": item.mrp,
+            "rate": item.rate,
+            "discount_percent": item_discount,
+            "line_total": line_total,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+    calculated_mrp_total = round(calculated_mrp_total, 2)
+    calculated_final_amount = round(calculated_final_amount, 2)
+    
+    # Calculate the effective overall discount % for the Excel header
+    effective_discount = 0.0
+    if calculated_mrp_total > 0:
+        effective_discount = round((1 - (calculated_final_amount / calculated_mrp_total)) * 100, 2)
+
+    advance_amount = round(calculated_final_amount * po_data.advance_percent / 100, 2)
 
     po_doc = {
         "po_number": po_data.po_number,
@@ -132,10 +174,10 @@ async def create_purchase_order(request: CreatePORequest, db=Depends(get_db)):
         "status": POStatus.DRAFT.value,
         "pricing_mode": po_data.pricing_mode.value,
         "order_id": ObjectId(po_data.order_id) if po_data.order_id else None,
-        "discount_percent": po_data.discount_percent,
+        "discount_percent": effective_discount,  # Saves the true 16% discount
         "advance_percent": po_data.advance_percent,
-        "mrp_total": mrp_total,
-        "final_amount": final_amount,
+        "mrp_total": calculated_mrp_total,
+        "final_amount": calculated_final_amount, # Saves the discounted ₹37,62,108
         "advance_amount": advance_amount,
         "invoice_ids": [],
         "created_at": now,
@@ -145,24 +187,10 @@ async def create_purchase_order(request: CreatePORequest, db=Depends(get_db)):
     result = await db["purchase_orders"].insert_one(po_doc)
     po_id = result.inserted_id
 
-    line_docs = [
-        {
-            "po_id": po_id,
-            "product_id": ObjectId(item.product_id) if item.product_id else None,
-            "part_number": item.part_number,
-            "brand": item.brand,
-            "sl_number": idx + 1,
-            "qty_ordered": item.qty_ordered,
-            "qty_fulfilled": 0.0,
-            "mrp": item.mrp,
-            "rate": item.rate,
-            "discount_percent": item.discount_percent if item.discount_percent is not None else po_data.discount_percent,
-            "line_total": round(item.qty_ordered * item.rate, 2),
-            "created_at": now,
-            "updated_at": now,
-        }
-        for idx, item in enumerate(line_items)
-    ]
+    # Attach PO ID and insert line items
+    for doc in line_docs:
+        doc["po_id"] = po_id
+        
     await db["purchase_order_details"].insert_many(line_docs)
 
     return {
@@ -264,6 +292,57 @@ async def download_po_excel(po_id: str, db=Depends(get_db)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+@router.delete("/{po_id}")
+async def delete_purchase_order(po_id: str, db=Depends(get_db)):
+    """
+    Delete a Purchase Order and all related data.
+    
+    Safety Rules:
+    - Cannot delete if PO has linked invoices
+    - Cannot delete if status is 'fulfilled' or 'partially_fulfilled'
+    - Cascades to delete all line items
+    """
+    try:
+        po_oid = ObjectId(po_id)
+    except:
+        raise HTTPException(400, "Invalid PO ID format")
+
+    # Fetch PO
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+
+    # Safety Check 1: Cannot delete if has linked invoices
+    if po.get("invoice_ids") and len(po["invoice_ids"]) > 0:
+        raise HTTPException(
+            409,
+            f"Cannot delete PO: {len(po['invoice_ids'])} invoice(s) linked. "
+            "Unlink all invoices first."
+        )
+
+    # Safety Check 2: Cannot delete fulfilled/partially_fulfilled POs
+    if po.get("status") in ["fulfilled", "partially_fulfilled"]:
+        raise HTTPException(
+            409,
+            f"Cannot delete PO with status '{po['status']}'. "
+            "Only draft, pending, confirmed, or cancelled POs can be deleted."
+        )
+
+    # Cascade Delete: Remove all line items
+    delete_result = await db["purchase_order_details"].delete_many({"po_id": po_oid})
+    deleted_items = delete_result.deleted_count
+
+    # Delete the PO itself
+    await db["purchase_orders"].delete_one({"_id": po_oid})
+
+    return {
+        "success": True,
+        "po_id": po_id,
+        "po_number": po.get("po_number"),
+        "deleted_line_items": deleted_items,
+        "message": f"Purchase Order {po.get('po_number')} deleted successfully"
+    }
 
 
 @router.post("/import/preview")
