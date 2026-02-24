@@ -460,9 +460,7 @@ async def link_invoices_to_po(
         invoice_ids=final_ids
     )
 
-
-
-@router.get("/{po_id}/invoices", response_model=List[InvoiceSummary])
+@router.get("/{po_id}/invoices")
 async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
     """
     Get all invoices linked to this PO.
@@ -484,18 +482,21 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
                 params={"po_id": po_id}
             )
             resp.raise_for_status()
-            invoices = resp.json()
             
-            # Transform to InvoiceSummary format
+            # 💥 THE FIX: The response is already a list, so we just iterate over it directly!
+            invoices_list = resp.json()
+            
+            # Transform to the format the UI expects
             return [
-                InvoiceSummary(
-                    _id=str(inv["_id"]),
-                    invoice_number=inv.get("invoice_number", "N/A"),
-                    supplier_name=inv.get("supplier_name", "Unknown"),
-                    invoice_date=inv.get("invoice_date"),
-                    total_value=inv.get("total_value", 0.0)
-                )
-                for inv in invoices.get("invoices", [])
+                {
+                    "_id": str(inv["_id"]),
+                    "invoice_number": inv.get("invoice_number", "N/A"),
+                    "supplier_name": inv.get("supplier_name", "Unknown"),
+                    "invoice_date": inv.get("invoice_date"),
+                    # Note: Ops backend uses "total_amount", but UI mapped it to "total_value"
+                    "total_value": inv.get("total_amount", 0.0) 
+                }
+                for inv in invoices_list
             ]
             
     except httpx.HTTPError as e:
