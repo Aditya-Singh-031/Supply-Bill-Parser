@@ -54,15 +54,16 @@ async def setup_admin():
     email = "superadmin@morsebiz.com"
     password = "SuperAdmin@9060"
     
-    # Check if user already exists to prevent duplicates
-    existing = await users_collection.find_one({"email": email})
-    if existing:
-        return {"message": "Admin user already exists in the database."}
+    # 💥 THE FIX: Delete the broken record we just made
+    await users_collection.delete_one({"email": email})
 
+    # 💥 THE FIX: Map the keys exactly to what Pydantic expects
     user_doc = {
         "email": email,
+        "username": email,           # Added username
         "hashed_password": get_password_hash(password),
         "full_name": "Super Admin",
+        "name": "Super Admin",       # Added name
         "role": "superadmin",
         "status": "active",
         "created_at": datetime.utcnow(),
@@ -70,4 +71,4 @@ async def setup_admin():
     }
     
     await users_collection.insert_one(user_doc)
-    return {"message": f"Success! Superadmin {email} created."}
+    return {"message": f"Success! Superadmin {email} created with correct schema."}
