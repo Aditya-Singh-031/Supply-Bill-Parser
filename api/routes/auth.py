@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from api.core.database import get_database
-from api.core.security import verify_password, create_access_token
+# 💥 Added get_password_hash to imports
+from api.core.security import verify_password, create_access_token, get_password_hash 
 from api.models.user import LoginRequest, Token, UserResponse
 from datetime import datetime
 
@@ -40,3 +41,33 @@ async def login(credentials: LoginRequest):
         "token_type": "bearer",
         "user": user
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💥 TEMPORARY RECOVERY ENDPOINT
+# ─────────────────────────────────────────────────────────────────────────────
+@router.post("/setup-admin")
+async def setup_admin():
+    """Temporary endpoint to recreate the superadmin after a database wipe."""
+    db = get_database()
+    users_collection = db["users"]
+    
+    email = "superadmin@morsebiz.com"
+    password = "SuperAdmin@9060"
+    
+    # Check if user already exists to prevent duplicates
+    existing = await users_collection.find_one({"email": email})
+    if existing:
+        return {"message": "Admin user already exists in the database."}
+
+    user_doc = {
+        "email": email,
+        "hashed_password": get_password_hash(password),
+        "full_name": "Super Admin",
+        "role": "superadmin",
+        "status": "active",
+        "created_at": datetime.utcnow(),
+        "last_login": None
+    }
+    
+    await users_collection.insert_one(user_doc)
+    return {"message": f"Success! Superadmin {email} created."}
