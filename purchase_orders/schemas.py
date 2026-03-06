@@ -33,6 +33,7 @@ class POCreate(BaseModel):
     order_id: Optional[str] = None
     discount_percent: float = Field(default=0.0, ge=0, le=100)
     advance_percent: float = Field(default=50.0, ge=0, le=100)
+    proforma_invoice_ids: List[str] = Field(default_factory=list, description="IDs of associated confirmed Proforma Invoices")
 
     @validator("po_number")
     def clean_po_number(cls, v):

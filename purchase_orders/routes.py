@@ -83,7 +83,7 @@ async def create_purchase_order(request: CreatePORequest, db=Depends(get_db)):
         "po_date": po_data.po_date, "status": POStatus.DRAFT.value, "pricing_mode": po_data.pricing_mode.value,
         "order_id": ObjectId(po_data.order_id) if po_data.order_id else None, "discount_percent": effective_discount, 
         "advance_percent": po_data.advance_percent, "mrp_total": calculated_mrp_total, "final_amount": calculated_final_amount, 
-        "advance_amount": advance_amount, "invoice_ids": [], "created_at": now, "updated_at": now,
+        "advance_amount": advance_amount, "invoice_ids": [], "proforma_invoice_ids": po_data.proforma_invoice_ids or [], "created_at": now, "updated_at": now,
     }
 
     result = await db["purchase_orders"].insert_one(po_doc)
