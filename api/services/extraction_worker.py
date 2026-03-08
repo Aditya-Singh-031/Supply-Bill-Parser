@@ -9,7 +9,6 @@ try:
     from parser.pdf_parser import extract_invoice_content
     from parser.ai_extractor import extract_invoice_level1
     
-    # ─── UPDATED: Now accepts progress_callback ───
     def extract_and_validate_invoice(file_path, progress_callback=None):
         filename = os.path.basename(file_path)
         try:
@@ -17,7 +16,7 @@ try:
             if progress_callback: progress_callback(10, "Reading PDF structure...")
             invoice_content_dict = extract_invoice_content(file_path)
             
-            # 2. AI Extraction (Passes callback down for chunking updates!)
+            # 2. AI Extraction 
             if progress_callback: progress_callback(20, "Initiating AI Extraction...")
             raw_result = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
             
@@ -27,43 +26,43 @@ try:
             elif isinstance(raw_result, dict): result_dict = raw_result
             else: return {"error": f"Invalid format: {type(raw_result)}"}
 
-            # 💥 THE FIX: Strict Line Item Deduplication to fix Chunking Overlap 💥
+            # 💥 THE FIX: Sliding Window Deduplication 💥
             if "line_items" in result_dict and isinstance(result_dict["line_items"], list):
-                if progress_callback: progress_callback(85, "Deduplicating line items...")
+                if progress_callback: progress_callback(85, "Removing chunk boundaries...")
                 
                 unique_items = []
-                seen_signatures = set()
-                seen_sl_numbers = set()
+                # Keep a rolling buffer of the last 20 items to catch immediate chunk overlaps
+                # without destroying legitimate repeated items on later pages.
+                recent_signatures = [] 
 
                 for item in result_dict["line_items"]:
-                    # 1. Try to deduplicate by Serial Number first (if it's a valid integer > 0)
-                    sl_num = item.get("sl_number")
-                    try:
-                        sl_num = int(sl_num)
-                    except:
-                        sl_num = None
-
-                    if sl_num and sl_num > 0:
-                        if sl_num in seen_sl_numbers:
-                            continue # Skip! We already have this serial number from a previous chunk.
-                        seen_sl_numbers.add(sl_num)
-                        unique_items.append(item)
-                        continue
-
-                    # 2. Fallback: If no valid Serial Number, create a unique "signature" for the row
-                    # We hash the part number, description, and quantity to identify duplicates
+                    sl_num = str(item.get("sl_number", "")).strip()
                     part_str = str(item.get("part_number", "")).strip().lower()
                     desc_str = str(item.get("description", "")).strip().lower()
                     qty_str = str(item.get("quantity", "")).strip()
                     price_str = str(item.get("unit_price", "")).strip()
                     
-                    signature = f"{part_str}_{desc_str}_{qty_str}_{price_str}"
+                    # Create a strict signature. If sl_num is accurate, two identical parts 
+                    # back-to-back will still be safe because their sl_nums differ.
+                    signature = f"{sl_num}_{part_str}_{desc_str}_{qty_str}_{price_str}"
                     
-                    if signature not in seen_signatures:
-                        seen_signatures.add(signature)
+                    # Ignore completely empty rows from being deduplicated
+                    if signature == "____":
                         unique_items.append(item)
+                        continue
 
-                # Reassign the cleaned list back to the result and recalculate the total quantity/amount
+                    # If this exact row appeared in the recent buffer, it's a chunk overlap!
+                    if signature in recent_signatures:
+                        continue 
+                        
+                    # Otherwise, it's a valid row
+                    unique_items.append(item)
+                    
+                    # Add to our rolling window and keep it small
+                    recent_signatures.append(signature)
+                    if len(recent_signatures) > 20:
+                        recent_signatures.pop(0)
+
                 result_dict["line_items"] = unique_items
                 
                 # Recalculate totals based ONLY on the unique items
@@ -116,15 +115,16 @@ def process_single_pdf_worker(args):
         # 1. Duplicate Check
         if is_duplicate:
             print(f"   ⏩ Skipping AI for duplicate: {filename}")
-            RedisClient.update_pdf_progress(job_id, str(index), "completed", 100, "Duplicate (Skipped AI)")
+            existing = await db_service.get_invoice_by_hash(file_hash)
+            existing_file_name = os.path.basename(existing.pdf_url) if existing and existing.pdf_url else "Database"
+            
+            RedisClient.update_pdf_progress(
+                job_id, str(index), "completed", 100, 
+                f"Skipped AI: Data fetched from existing record '{existing_file_name}'"
+            )
             return {
-                "success": True, 
-                "index": index, 
-                "filename": filename, 
-                "data": None, 
-                "is_duplicate": True, 
-                "file_hash": file_hash,
-                "temp_path": file_path
+                "success": True, "index": index, "filename": filename, 
+                "data": None, "is_duplicate": True, "file_hash": file_hash, "temp_path": file_path
             }
 
         # 2. Start Extraction
@@ -143,7 +143,7 @@ def process_single_pdf_worker(args):
 
         # 4. Success
         items = result.get("line_items", [])
-        live_progress_callback(90, f"Extracted & Cleaned {len(items)} unique items. Finalizing...")
+        live_progress_callback(90, f"Extracted exactly {len(items)} items. Finalizing...")
 
         return {
             "success": True, 
