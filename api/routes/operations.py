@@ -212,3 +212,40 @@ async def export_selected_invoices(request: BulkExportRequest):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename
     )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+# 💥 NEW: DELETE INVOICES
+# ─────────────────────────────────────────────────────────────────────────────
+class DeleteInvoicesRequest(BaseModel):
+    invoice_ids: List[str]
+
+@router.delete("/delete-selected")
+async def delete_selected_invoices(request: DeleteInvoicesRequest):
+    """
+    Deletes selected invoices and their line items from MongoDB.
+    Also removes the physical PDF files from storage.
+    """
+    db = get_database()
+    deleted_count = 0
+    
+    for inv_id_str in request.invoice_ids:
+        # 1. Fetch the invoice to get the PDF path
+        invoice = await db.invoices.find_one({"invoice_id": inv_id_str})
+        
+        if invoice:
+            # 2. Delete the physical file
+            pdf_path = invoice.get("pdf_url")
+            if pdf_path and os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except Exception as e:
+                    print(f"⚠️ Failed to delete physical file {pdf_path}: {e}")
+            
+            # 3. Delete Line Items
+            await db.invoice_line_items.delete_many({"invoice_id": inv_id_str})
+            
+            # 4. Delete Invoice Document
+            await db.invoices.delete_one({"invoice_id": inv_id_str})
+            deleted_count += 1
+            
+    return {"message": f"Successfully deleted {deleted_count} invoices", "deleted_count": deleted_count}

@@ -67,10 +67,12 @@ async def process_invoices_background(job_id: str, file_paths: List[str]):
                     item_count = len(lines)
                     total_amt = sum(l.quantity * l.unit_price for l in lines if l.quantity and l.unit_price)
                     
-                    # 💥 FIX 1: Attach invoice_id for Duplicate files
+                    # 💥 THE FIX: Add the existing filename to the Redis message
+                    existing_file_name = os.path.basename(existing.pdf_url) if existing.pdf_url else "Database"
+                    
                     RedisClient.update_pdf_progress(
                         job_id, index, "completed", 100, 
-                        f"Duplicate ({item_count} items)", 
+                        f"Skipped AI: Data fetched from existing record '{existing_file_name}'", # 💥 Updated Message
                         line_items=item_count, total_amount=total_amt,
                         invoice_id=str(existing.invoice_id) 
                     )
