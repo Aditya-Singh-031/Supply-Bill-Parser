@@ -26,13 +26,11 @@ try:
             elif isinstance(raw_result, dict): result_dict = raw_result
             else: return {"error": f"Invalid format: {type(raw_result)}"}
 
-            # 💥 THE FIX: Sliding Window Deduplication 💥
+            # 💥 Sliding Window Deduplication (Safely kept intact!) 💥
             if "line_items" in result_dict and isinstance(result_dict["line_items"], list):
                 if progress_callback: progress_callback(85, "Removing chunk boundaries...")
                 
                 unique_items = []
-                # Keep a rolling buffer of the last 20 items to catch immediate chunk overlaps
-                # without destroying legitimate repeated items on later pages.
                 recent_signatures = [] 
 
                 for item in result_dict["line_items"]:
@@ -42,30 +40,23 @@ try:
                     qty_str = str(item.get("quantity", "")).strip()
                     price_str = str(item.get("unit_price", "")).strip()
                     
-                    # Create a strict signature. If sl_num is accurate, two identical parts 
-                    # back-to-back will still be safe because their sl_nums differ.
                     signature = f"{sl_num}_{part_str}_{desc_str}_{qty_str}_{price_str}"
                     
-                    # Ignore completely empty rows from being deduplicated
                     if signature == "____":
                         unique_items.append(item)
                         continue
 
-                    # If this exact row appeared in the recent buffer, it's a chunk overlap!
                     if signature in recent_signatures:
                         continue 
                         
-                    # Otherwise, it's a valid row
                     unique_items.append(item)
                     
-                    # Add to our rolling window and keep it small
                     recent_signatures.append(signature)
                     if len(recent_signatures) > 20:
                         recent_signatures.pop(0)
 
                 result_dict["line_items"] = unique_items
                 
-                # Recalculate totals based ONLY on the unique items
                 calc_total_amt = 0.0
                 calc_total_qty = 0.0
                 for item in unique_items:
@@ -115,16 +106,16 @@ def process_single_pdf_worker(args):
         # 1. Duplicate Check
         if is_duplicate:
             print(f"   ⏩ Skipping AI for duplicate: {filename}")
-            existing = await db_service.get_invoice_by_hash(file_hash)
-            existing_file_name = os.path.basename(existing.pdf_url) if existing and existing.pdf_url else "Database"
-            
-            RedisClient.update_pdf_progress(
-                job_id, str(index), "completed", 100, 
-                f"Skipped AI: Data fetched from existing record '{existing_file_name}'"
-            )
+            # 💥 THE FIX: Removed the async DB call! Returning immediately so processor.py handles it safely.
+            RedisClient.update_pdf_progress(job_id, str(index), "completed", 100, "Duplicate (Skipped AI)")
             return {
-                "success": True, "index": index, "filename": filename, 
-                "data": None, "is_duplicate": True, "file_hash": file_hash, "temp_path": file_path
+                "success": True, 
+                "index": index, 
+                "filename": filename, 
+                "data": None, 
+                "is_duplicate": True, 
+                "file_hash": file_hash, 
+                "temp_path": file_path
             }
 
         # 2. Start Extraction
