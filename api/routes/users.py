@@ -4,11 +4,11 @@ from bson import ObjectId
 from datetime import datetime
 from api.core.database import get_database
 from api.models.user import UserCreate, UserUpdate, UserResponse
-from api.core.security import get_password_hash
+# 💥 NEW: Import the bouncer
+from api.core.security import get_password_hash, require_superadmin
 
 router = APIRouter()
 
-# Helper to normalize user doc for API response (id, snake_case, no secrets)
 def fix_id(user):
     user = dict(user)
     user["id"] = str(user["_id"])
@@ -18,24 +18,23 @@ def fix_id(user):
     user.pop("hashed_password", None)
     return user
 
-# 1. GET ALL USERS
-@router.get("/", response_model=List[UserResponse])
+# 1. GET ALL USERS (Protected)
+# 💥 Added Depends(require_superadmin)
+@router.get("/", response_model=List[UserResponse], dependencies=[Depends(require_superadmin)])
 async def get_users():
     db = get_database()
     users = await db["users"].find().to_list(100)
     return [fix_id(user) for user in users]
 
-# 2. CREATE USER
-@router.post("/", response_model=UserResponse)
+# 2. CREATE USER (Protected)
+@router.post("/", response_model=UserResponse, dependencies=[Depends(require_superadmin)])
 async def create_user(user_in: UserCreate):
     db = get_database()
     
-    # Check if email exists
     if await db["users"].find_one({"email": user_in.email}):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user_dict = user_in.dict()
-    # Hash the password
     user_dict["hashed_password"] = get_password_hash(user_dict.pop("password"))
     user_dict["created_at"] = datetime.utcnow()
     
@@ -43,8 +42,8 @@ async def create_user(user_in: UserCreate):
     created_user = await db["users"].find_one({"_id": new_user.inserted_id})
     return fix_id(created_user)
 
-# 3. UPDATE USER
-@router.put("/{user_id}", response_model=UserResponse)
+# 3. UPDATE USER (Protected)
+@router.put("/{user_id}", response_model=UserResponse, dependencies=[Depends(require_superadmin)])
 async def update_user(user_id: str, user_in: UserUpdate):
     db = get_database()
     
@@ -53,7 +52,6 @@ async def update_user(user_id: str, user_in: UserUpdate):
 
     update_data = {k: v for k, v in user_in.dict().items() if v is not None}
 
-    # If password is being updated, hash it
     if "password" in update_data:
         update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
 
@@ -71,8 +69,8 @@ async def update_user(user_id: str, user_in: UserUpdate):
     updated_user = await db["users"].find_one({"_id": ObjectId(user_id)})
     return fix_id(updated_user)
 
-# 4. DELETE USER
-@router.delete("/{user_id}")
+# 4. DELETE USER (Protected)
+@router.delete("/{user_id}", dependencies=[Depends(require_superadmin)])
 async def delete_user(user_id: str):
     db = get_database()
     

@@ -30,10 +30,18 @@ async def login(credentials: LoginRequest):
         {"$set": {"last_login": datetime.utcnow()}}
     )
 
+    # ... previous code ...
+
     # 5. Generate Token
-    access_token = create_access_token(data={"sub": user["email"]})
+    # 💥 THE FIX: Inject the role into the JWT token payload
+    access_token = create_access_token(
+        data={
+            "sub": user["email"], 
+            "role": user.get("role", "admin") # Default to admin if missing
+        }
+    )
     
-    # 6. Return Token + User Info (converting MongoDB _id to string)
+    # 6. Return Token + User Info 
     user["id"] = str(user["_id"])
     return {
         "access_token": access_token,

@@ -39,6 +39,10 @@ class DatabaseService:
         invoice = await self.invoices.find_one({"file_hash": file_hash})
         if invoice:
             invoice.pop("_id", None)
+
+            if invoice.get("po_id"):
+                invoice["po_id"] = str(invoice["po_id"])
+
             return InvoiceResponse(**invoice)
         return None
 
