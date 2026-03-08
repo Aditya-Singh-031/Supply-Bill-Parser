@@ -21,14 +21,69 @@ try:
             if progress_callback: progress_callback(20, "Initiating AI Extraction...")
             raw_result = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
             
-            # 3. Convert to Dict (Pydantic -> Dict)
-            if hasattr(raw_result, "model_dump"): return raw_result.model_dump()
-            elif hasattr(raw_result, "dict"): return raw_result.dict()
-            elif isinstance(raw_result, dict): return raw_result
+            # 3. Convert to Dict
+            if hasattr(raw_result, "model_dump"): result_dict = raw_result.model_dump()
+            elif hasattr(raw_result, "dict"): result_dict = raw_result.dict()
+            elif isinstance(raw_result, dict): result_dict = raw_result
             else: return {"error": f"Invalid format: {type(raw_result)}"}
+
+            # 💥 THE FIX: Strict Line Item Deduplication to fix Chunking Overlap 💥
+            if "line_items" in result_dict and isinstance(result_dict["line_items"], list):
+                if progress_callback: progress_callback(85, "Deduplicating line items...")
+                
+                unique_items = []
+                seen_signatures = set()
+                seen_sl_numbers = set()
+
+                for item in result_dict["line_items"]:
+                    # 1. Try to deduplicate by Serial Number first (if it's a valid integer > 0)
+                    sl_num = item.get("sl_number")
+                    try:
+                        sl_num = int(sl_num)
+                    except:
+                        sl_num = None
+
+                    if sl_num and sl_num > 0:
+                        if sl_num in seen_sl_numbers:
+                            continue # Skip! We already have this serial number from a previous chunk.
+                        seen_sl_numbers.add(sl_num)
+                        unique_items.append(item)
+                        continue
+
+                    # 2. Fallback: If no valid Serial Number, create a unique "signature" for the row
+                    # We hash the part number, description, and quantity to identify duplicates
+                    part_str = str(item.get("part_number", "")).strip().lower()
+                    desc_str = str(item.get("description", "")).strip().lower()
+                    qty_str = str(item.get("quantity", "")).strip()
+                    price_str = str(item.get("unit_price", "")).strip()
+                    
+                    signature = f"{part_str}_{desc_str}_{qty_str}_{price_str}"
+                    
+                    if signature not in seen_signatures:
+                        seen_signatures.add(signature)
+                        unique_items.append(item)
+
+                # Reassign the cleaned list back to the result and recalculate the total quantity/amount
+                result_dict["line_items"] = unique_items
+                
+                # Recalculate totals based ONLY on the unique items
+                calc_total_amt = 0.0
+                calc_total_qty = 0.0
+                for item in unique_items:
+                    try:
+                        q = float(str(item.get("quantity", 0)).replace(",", "").strip() or 0)
+                        p = float(str(item.get("unit_price", 0)).replace(",", "").strip() or 0)
+                        calc_total_qty += q
+                        calc_total_amt += (q * p)
+                    except:
+                        pass
+                
+                result_dict["total_amount"] = calc_total_amt
+                result_dict["total_quantity"] = calc_total_qty
+
+            return result_dict
             
         except Exception as e:
-            # Catch generic errors
             print(f"❌ Extraction Exception on {filename}:")
             traceback.print_exc()
             return {"error": str(e)}
@@ -54,9 +109,7 @@ def process_single_pdf_worker(args):
     job_id, file_path, index, file_hash, is_duplicate = args
     filename = os.path.basename(file_path).split('_', 1)[1]
 
-    # ─── THE MAGIC WIRING: LIVE CALLBACK ───
     def live_progress_callback(percent: int, message: str):
-        # Instantly updates Redis so your SSE stream sends it to the frontend!
         RedisClient.update_pdf_progress(job_id, str(index), "processing", percent, message)
 
     try:
@@ -78,7 +131,6 @@ def process_single_pdf_worker(args):
         live_progress_callback(5, "Worker started...")
         print(f"   ⚡ Worker processing: {filename}")
         
-        # ─── INJECT CALLBACK HERE ───
         result = extract_and_validate_invoice(file_path, progress_callback=live_progress_callback)
         
         # 3. Handle Errors
@@ -91,7 +143,7 @@ def process_single_pdf_worker(args):
 
         # 4. Success
         items = result.get("line_items", [])
-        live_progress_callback(90, f"Extracted {len(items)} items. Finalizing...")
+        live_progress_callback(90, f"Extracted & Cleaned {len(items)} unique items. Finalizing...")
 
         return {
             "success": True, 
