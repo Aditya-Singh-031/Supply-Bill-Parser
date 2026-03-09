@@ -8,7 +8,7 @@ from api.core.redis_client import RedisClient
 try:
     from parser.pdf_parser import extract_invoice_content
     from parser.ai_extractor import extract_invoice_level1, extract_invoice_level2
-    from parser.validator import validate_invoice  # 💥 NEW: Importing the validator
+    from parser.validator import validate_invoice  
     
     def extract_and_validate_invoice(file_path, progress_callback=None):
         filename = os.path.basename(file_path)
@@ -19,7 +19,6 @@ try:
             if progress_callback: progress_callback(20, "Initiating Level 1 AI Extraction...")
             invoice_obj = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
             
-            # 💥 YOUR REQUEST: Trigger Level 2 Validation Pipeline 💥
             if progress_callback: progress_callback(75, "Validating Math & Totals...")
             report = validate_invoice(invoice_obj)
 
@@ -27,14 +26,23 @@ try:
                 if progress_callback: progress_callback(80, "Discrepancy detected! Triggering Level-2 AI Correction...")
                 validation_text = report.to_prompt_text()
                 
-                # Level 2 AI will look at the entire context + the validation errors and fix the missing rows!
-                invoice_obj = extract_invoice_level2(
-                    invoice_content=invoice_content_dict,
-                    level1_invoice=invoice_obj,
-                    validation_report_text=validation_text,
-                    source_file=filename
-                )
-                if progress_callback: progress_callback(90, "Level-2 Correction Complete.")
+                try:
+                    # Attempt Level 2 Correction
+                    invoice_obj = extract_invoice_level2(
+                        invoice_content=invoice_content_dict,
+                        level1_invoice=invoice_obj,
+                        validation_report_text=validation_text,
+                        source_file=filename
+                    )
+                    if progress_callback: progress_callback(90, "Level-2 Correction Complete.")
+                except openai.BadRequestError as ai_err:
+                    # 💥 THE FIX: Gracefully handle massive invoice token limits
+                    if "context_length_exceeded" in str(ai_err):
+                        print(f"⚠️ Invoice too large for Level-2 correction (Token Limit). Saving Level-1 data ({len(invoice_obj.line_items)} items).")
+                        if progress_callback: progress_callback(90, "Invoice massive. Skipping L2, saving primary data...")
+                        # We intentionally DO NOT raise the error here, we let it fall through and save invoice_obj!
+                    else:
+                        raise ai_err
 
             # Convert final validated object to dictionary
             if hasattr(invoice_obj, "model_dump"): result_dict = invoice_obj.model_dump()
