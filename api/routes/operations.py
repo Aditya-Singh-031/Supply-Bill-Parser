@@ -52,7 +52,6 @@ async def get_all_operations():
                             "vendor_name": "Scanning...",
                             "invoice_number": "---",
                             "invoice_date": "---",
-                            # 💥 NEW: Default zero values for temp files
                             "total_amount": 0,
                             "total_cost": 0,
                             "total_discount": 0,
@@ -73,7 +72,6 @@ async def get_all_operations():
         po_id_val = str(doc["po_id"]) if doc.get("po_id") else None
         invoice_id_str = str(doc["invoice_id"])
         
-        # 💥 THE FIX: Fetch line items to dynamically calculate exact totals
         lines_cursor = db.invoice_line_items.find({"invoice_id": invoice_id_str})
         
         calc_total_mrp = 0.0
@@ -84,9 +82,17 @@ async def get_all_operations():
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             disc_pct = float(item.get("discount_percent") or 0)
-            igst = float(item.get("igst_rate") or 0)
             
-            # Math execution
+            # 💥 THE FIX: Smart GST Calculation
+            igst = float(item.get("igst_rate") or 0)
+            cgst = float(item.get("cgst_rate") or 0)
+            sgst = float(item.get("sgst_rate") or 0)
+            
+            # If IGST is missing, dynamically calculate it from CGST and SGST
+            if igst == 0 and (cgst > 0 or sgst > 0):
+                igst = cgst + sgst
+            
+            # Math execution (Summing individual parts per your request)
             disc_rate = price * (1 - (disc_pct / 100))
             line_cost = disc_rate * qty
             line_with_gst = line_cost * (1 + (igst / 100))
@@ -97,8 +103,8 @@ async def get_all_operations():
             
         total_discount = calc_total_mrp - calc_total_cost
         
-        # Fallback to doc total if no lines exist
-        final_total_with_gst = calc_total_with_gst if calc_total_with_gst > 0 else doc.get("total_amount", 0)
+        # We strictly use the line-item calculated totals for high accuracy
+        final_total_with_gst = calc_total_with_gst if calc_total_with_gst > 0 else float(doc.get("total_amount") or 0)
         
         combined_list.append({
             "id": invoice_id_str,
@@ -107,7 +113,6 @@ async def get_all_operations():
             "vendor_name": doc.get("vendor_name") or "Unknown",
             "invoice_number": doc.get("invoice_number") or "N/A",
             "invoice_date": doc.get("invoice_date") or "N/A",
-            # 💥 NEW: Send granular totals to the UI
             "total_amount": calc_total_mrp,
             "total_cost": calc_total_cost,
             "total_discount": total_discount,
@@ -128,7 +133,6 @@ async def get_all_operations():
 
     combined_list.sort(key=lambda x: parse_time(x["upload_timestamp"]), reverse=True)
     return combined_list
-
 
 @router.post("/export-selected")
 async def export_selected_invoices(request: BulkExportRequest):
@@ -167,19 +171,24 @@ async def export_selected_invoices(request: BulkExportRequest):
             flattened_data.append(row)
         
         for item in items:
-            # 💥 THE FIX: Extract variables for advanced Excel calculations
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             disc_pct = float(item.get("discount_percent") or 0)
-            igst_rate = float(item.get("igst_rate") or 0)
             
-            # 💥 Execute Math formulas
+            # 💥 THE FIX: Smart GST extraction and fallback mapping for Excel Export
+            igst_rate = float(item.get("igst_rate") or 0)
+            cgst_rate = float(item.get("cgst_rate") or 0)
+            sgst_rate = float(item.get("sgst_rate") or 0)
+            
+            if igst_rate == 0 and (cgst_rate > 0 or sgst_rate > 0):
+                igst_rate = cgst_rate + sgst_rate
+            elif igst_rate > 0 and cgst_rate == 0 and sgst_rate == 0:
+                cgst_rate = igst_rate / 2
+                sgst_rate = igst_rate / 2
+
+            # Execute Math formulas
             disc_rate = price * (1 - (disc_pct / 100))
             total_cost = disc_rate * qty
-            
-            # Map GST (IGST acts as the total tax rate, so CGST/SGST are half of it)
-            cgst_rate = igst_rate / 2
-            sgst_rate = igst_rate / 2
             total_with_gst = total_cost * (1 + (igst_rate / 100))
 
             row = base_row.copy()
@@ -189,7 +198,6 @@ async def export_selected_invoices(request: BulkExportRequest):
                 "HSN": item.get("hsn_code"),
                 "Quantity": qty,
                 "Unit Price": price,
-                # 💥 NEW: Formatted Excel Columns
                 "Discount %": disc_pct,
                 "Discounted Rate": round(disc_rate, 2),
                 "Total Cost": round(total_cost, 2),
@@ -213,8 +221,8 @@ async def export_selected_invoices(request: BulkExportRequest):
         filename=filename
     )
 
-    # ─────────────────────────────────────────────────────────────────────────────
-# 💥 NEW: DELETE INVOICES
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: DELETE INVOICES 
 # ─────────────────────────────────────────────────────────────────────────────
 class DeleteInvoicesRequest(BaseModel):
     invoice_ids: List[str]
