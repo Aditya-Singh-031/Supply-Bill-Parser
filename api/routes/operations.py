@@ -3,8 +3,8 @@ import json
 import pandas as pd
 from datetime import datetime
 from typing import List
-from fastapi import APIRouter, HTTPException, Query, Response # 💥 Added Response
-from fastapi.responses import FileResponse, JSONResponse # 💥 Added JSONResponse
+from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from api.core.database import get_database
@@ -88,10 +88,16 @@ async def get_all_operations():
         # Total amount of money saved
         total_discount = calc_total_mrp - calc_total_cost
         
-        # 💥 THE FIX: Implement requested table logic
         # Gross Value (Base MRP) vs Net Value (Total Cost)
         final_total_with_gst = calc_total_cost + total_discount
         
+        # 💥 THE FIX: Safely convert MongoDB datetime objects to ISO strings
+        raw_timestamp = doc.get("created_at")
+        if isinstance(raw_timestamp, datetime):
+            safe_timestamp = raw_timestamp.isoformat()
+        else:
+            safe_timestamp = str(raw_timestamp)
+
         combined_list.append({
             "id": invoice_id_str,
             "invoice_id": invoice_id_str,
@@ -100,11 +106,11 @@ async def get_all_operations():
             "invoice_number": doc.get("invoice_number") or "N/A",
             "invoice_date": doc.get("invoice_date") or "N/A",
             "total_amount": calc_total_mrp,
-            "total_cost": calc_total_cost,             # The final discounted payable amount
-            "total_discount": total_discount,          # The money saved
-            "total_with_gst": final_total_with_gst,    # The Gross Base Value
+            "total_cost": calc_total_cost,             
+            "total_discount": total_discount,          
+            "total_with_gst": final_total_with_gst,    
             "status": "completed",
-            "upload_timestamp": doc.get("created_at"),
+            "upload_timestamp": safe_timestamp, # 💥 Used the safe string here
             "pdf_url": doc.get("pdf_url"), 
             "is_temp": False,
             "po_id": po_id_val 
@@ -119,7 +125,6 @@ async def get_all_operations():
 
     combined_list.sort(key=lambda x: parse_time(x["upload_timestamp"]), reverse=True)
     
-    # 💥 THE FIX: Add Cache-Control headers to force the Refresh button to work immediately
     return JSONResponse(
         content=combined_list,
         headers={
