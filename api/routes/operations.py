@@ -3,8 +3,8 @@ import json
 import pandas as pd
 from datetime import datetime
 from typing import List
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Response # 💥 Added Response
+from fastapi.responses import FileResponse, JSONResponse # 💥 Added JSONResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from api.core.database import get_database
@@ -13,19 +13,13 @@ from api.core.config import BILLS_EXCEL_DIR
 
 router = APIRouter()
 
-# --- Request Model for Bulk Export ---
 class BulkExportRequest(BaseModel):
     invoice_ids: List[str]
 
 @router.get("/list")
 async def get_all_operations():
-    """
-    Unified View: Combines 'Processing' files from Redis 
-    with 'Completed' invoices from MongoDB.
-    """
     combined_list = []
     
-    # 1. FETCH ACTIVE JOBS (REDIS) - The "Parsing" ones
     try:
         redis = RedisClient.get_client()
         if redis:
@@ -64,7 +58,6 @@ async def get_all_operations():
     except Exception as e:
         print(f"⚠️ Redis Fetch Error: {e}")
 
-    # 2. FETCH SAVED INVOICES (MONGODB) - The "Parsed" ones
     db = get_database()
     cursor = db.invoices.find().sort("created_at", -1).limit(200) 
     
@@ -76,35 +69,28 @@ async def get_all_operations():
         
         calc_total_mrp = 0.0
         calc_total_cost = 0.0
-        calc_total_with_gst = 0.0
         
         async for item in lines_cursor:
             qty = float(item.get("quantity") or 0)
             price = float(item.get("unit_price") or 0)
             disc_pct = float(item.get("discount_percent") or 0)
             
-            # 💥 THE FIX: Smart GST Calculation
-            igst = float(item.get("igst_rate") or 0)
-            cgst = float(item.get("cgst_rate") or 0)
-            sgst = float(item.get("sgst_rate") or 0)
+            # Base cost before any discounts
+            base_line_cost = price * qty
             
-            # If IGST is missing, dynamically calculate it from CGST and SGST
-            if igst == 0 and (cgst > 0 or sgst > 0):
-                igst = cgst + sgst
+            # Cost after discount is applied
+            discounted_rate = price * (1 - (disc_pct / 100))
+            final_line_cost = discounted_rate * qty
             
-            # Math execution (Summing individual parts per your request)
-            disc_rate = price * (1 - (disc_pct / 100))
-            line_cost = disc_rate * qty
-            line_with_gst = line_cost * (1 + (igst / 100))
+            calc_total_mrp += base_line_cost
+            calc_total_cost += final_line_cost
             
-            calc_total_mrp += (price * qty)
-            calc_total_cost += line_cost
-            calc_total_with_gst += line_with_gst
-            
+        # Total amount of money saved
         total_discount = calc_total_mrp - calc_total_cost
         
-        # We strictly use the line-item calculated totals for high accuracy
-        final_total_with_gst = calc_total_with_gst if calc_total_with_gst > 0 else float(doc.get("total_amount") or 0)
+        # 💥 THE FIX: Implement requested table logic
+        # Gross Value (Base MRP) vs Net Value (Total Cost)
+        final_total_with_gst = calc_total_cost + total_discount
         
         combined_list.append({
             "id": invoice_id_str,
@@ -114,9 +100,9 @@ async def get_all_operations():
             "invoice_number": doc.get("invoice_number") or "N/A",
             "invoice_date": doc.get("invoice_date") or "N/A",
             "total_amount": calc_total_mrp,
-            "total_cost": calc_total_cost,
-            "total_discount": total_discount,
-            "total_with_gst": final_total_with_gst,
+            "total_cost": calc_total_cost,             # The final discounted payable amount
+            "total_discount": total_discount,          # The money saved
+            "total_with_gst": final_total_with_gst,    # The Gross Base Value
             "status": "completed",
             "upload_timestamp": doc.get("created_at"),
             "pdf_url": doc.get("pdf_url"), 
@@ -132,15 +118,20 @@ async def get_all_operations():
         return t
 
     combined_list.sort(key=lambda x: parse_time(x["upload_timestamp"]), reverse=True)
-    return combined_list
+    
+    # 💥 THE FIX: Add Cache-Control headers to force the Refresh button to work immediately
+    return JSONResponse(
+        content=combined_list,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 @router.post("/export-selected")
 async def export_selected_invoices(request: BulkExportRequest):
-    """
-    Generates a merged Excel file for selected Invoice IDs.
-    """
     db = get_database()
-    
     ids = request.invoice_ids
     cursor = db.invoices.find({"invoice_id": {"$in": ids}})
     
@@ -175,7 +166,6 @@ async def export_selected_invoices(request: BulkExportRequest):
             price = float(item.get("unit_price") or 0)
             disc_pct = float(item.get("discount_percent") or 0)
             
-            # 💥 THE FIX: Smart GST extraction and fallback mapping for Excel Export
             igst_rate = float(item.get("igst_rate") or 0)
             cgst_rate = float(item.get("cgst_rate") or 0)
             sgst_rate = float(item.get("sgst_rate") or 0)
@@ -186,7 +176,6 @@ async def export_selected_invoices(request: BulkExportRequest):
                 cgst_rate = igst_rate / 2
                 sgst_rate = igst_rate / 2
 
-            # Execute Math formulas
             disc_rate = price * (1 - (disc_pct / 100))
             total_cost = disc_rate * qty
             total_with_gst = total_cost * (1 + (igst_rate / 100))
@@ -221,27 +210,17 @@ async def export_selected_invoices(request: BulkExportRequest):
         filename=filename
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NEW: DELETE INVOICES 
-# ─────────────────────────────────────────────────────────────────────────────
 class DeleteInvoicesRequest(BaseModel):
     invoice_ids: List[str]
 
 @router.delete("/delete-selected")
 async def delete_selected_invoices(request: DeleteInvoicesRequest):
-    """
-    Deletes selected invoices and their line items from MongoDB.
-    Also removes the physical PDF files from storage.
-    """
     db = get_database()
     deleted_count = 0
     
     for inv_id_str in request.invoice_ids:
-        # 1. Fetch the invoice to get the PDF path
         invoice = await db.invoices.find_one({"invoice_id": inv_id_str})
-        
         if invoice:
-            # 2. Delete the physical file
             pdf_path = invoice.get("pdf_url")
             if pdf_path and os.path.exists(pdf_path):
                 try:
@@ -249,10 +228,7 @@ async def delete_selected_invoices(request: DeleteInvoicesRequest):
                 except Exception as e:
                     print(f"⚠️ Failed to delete physical file {pdf_path}: {e}")
             
-            # 3. Delete Line Items
             await db.invoice_line_items.delete_many({"invoice_id": inv_id_str})
-            
-            # 4. Delete Invoice Document
             await db.invoices.delete_one({"invoice_id": inv_id_str})
             deleted_count += 1
             
