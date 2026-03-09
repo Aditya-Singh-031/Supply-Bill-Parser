@@ -4,10 +4,11 @@ import traceback
 import openai
 from api.core.redis_client import RedisClient
 
-# --- PARSER IMPORT ---
+# --- PARSER IMPORTS ---
 try:
     from parser.pdf_parser import extract_invoice_content
-    from parser.ai_extractor import extract_invoice_level1
+    from parser.ai_extractor import extract_invoice_level1, extract_invoice_level2
+    from parser.validator import validate_invoice  # 💥 NEW: Importing the validator
     
     def extract_and_validate_invoice(file_path, progress_callback=None):
         filename = os.path.basename(file_path)
@@ -15,93 +16,44 @@ try:
             if progress_callback: progress_callback(10, "Reading PDF structure...")
             invoice_content_dict = extract_invoice_content(file_path)
             
-            if progress_callback: progress_callback(20, "Initiating AI Extraction...")
-            raw_result = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
+            if progress_callback: progress_callback(20, "Initiating Level 1 AI Extraction...")
+            invoice_obj = extract_invoice_level1(invoice_content_dict, filename, progress_callback)
             
-            if hasattr(raw_result, "model_dump"): result_dict = raw_result.model_dump()
-            elif hasattr(raw_result, "dict"): result_dict = raw_result.dict()
-            elif isinstance(raw_result, dict): result_dict = raw_result
-            else: return {"error": f"Invalid format: {type(raw_result)}"}
+            # 💥 YOUR REQUEST: Trigger Level 2 Validation Pipeline 💥
+            if progress_callback: progress_callback(75, "Validating Math & Totals...")
+            report = validate_invoice(invoice_obj)
 
-            # 💥 THE FIX: Silver Bullet Deduplication 💥
-            if "line_items" in result_dict and isinstance(result_dict["line_items"], list):
-                if progress_callback: progress_callback(85, "Executing Silver-Bullet overlap removal...")
+            if not report.passed:
+                if progress_callback: progress_callback(80, "Discrepancy detected! Triggering Level-2 AI Correction...")
+                validation_text = report.to_prompt_text()
                 
-                unique_items = []
-                seen_sl_items = {} # Tracks S.No -> {index, part_prefix}
-                recent_signatures = [] 
+                # Level 2 AI will look at the entire context + the validation errors and fix the missing rows!
+                invoice_obj = extract_invoice_level2(
+                    invoice_content=invoice_content_dict,
+                    level1_invoice=invoice_obj,
+                    validation_report_text=validation_text,
+                    source_file=filename
+                )
+                if progress_callback: progress_callback(90, "Level-2 Correction Complete.")
 
-                for item in result_dict["line_items"]:
-                    # 1. Aggressively clean data to defeat AI formatting hallucinations
-                    raw_sl = str(item.get("sl_number", "")).strip()
-                    sl_digits = ''.join(filter(str.isdigit, raw_sl))
-                    sl_num = int(sl_digits) if sl_digits else None
-                    
-                    part_raw = str(item.get("part_number", ""))
-                    part_clean = ''.join(e for e in part_raw.lower() if e.isalnum())
-                    part_prefix = part_clean[:8] if part_clean else "no_part"
-                    
-                    try:
-                        qty = float(str(item.get("quantity", 0)).replace(",", "").strip() or 0)
-                        price = float(str(item.get("unit_price", 0)).replace(",", "").strip() or 0)
-                    except:
-                        qty, price = 0.0, 0.0
-                        
-                    signature = f"{part_prefix}_{qty}_{price}"
-
-                    # 🛡️ Strategy 1: Smart S.No Proximity Lock
-                    if sl_num is not None and 0 < sl_num < 10000:
-                        if sl_num in seen_sl_items:
-                            prev = seen_sl_items[sl_num]
-                            lines_since = len(unique_items) - prev['index']
-                            
-                            # It is a Chunk Overlap if EITHER:
-                            # A) We saw this exact S.No less than 20 lines ago (Impossible to be a new page)
-                            # B) The first 8 characters of the Part Number match the old one
-                            is_similar_part = (part_prefix != "no_part") and (part_prefix in prev['part_prefix'] or prev['part_prefix'] in part_prefix)
-                            
-                            if lines_since < 20 or is_similar_part:
-                                continue # Overlap caught and destroyed!
-                                
-                        # Valid new item
-                        seen_sl_items[sl_num] = {
-                            'index': len(unique_items),
-                            'part_prefix': part_prefix
-                        }
-                        unique_items.append(item)
-                        
-                        recent_signatures.append(signature)
-                        if len(recent_signatures) > 15: recent_signatures.pop(0)
-                        continue
-
-                    # 🛡️ Strategy 2: Fallback Sliding Window (For completely blank S.No columns)
-                    if signature == "no_part_0.0_0.0":
-                        unique_items.append(item)
-                        continue
-
-                    if signature in recent_signatures:
-                        continue 
-                        
-                    unique_items.append(item)
-                    recent_signatures.append(signature)
-                    if len(recent_signatures) > 15: recent_signatures.pop(0)
-
-                result_dict["line_items"] = unique_items
-                
-                # Recalculate true mathematical totals based ONLY on the verified unique items
-                calc_total_amt = 0.0
-                calc_total_qty = 0.0
-                for item in unique_items:
-                    try:
-                        q = float(str(item.get("quantity", 0)).replace(",", "").strip() or 0)
-                        p = float(str(item.get("unit_price", 0)).replace(",", "").strip() or 0)
-                        calc_total_qty += q
-                        calc_total_amt += (q * p)
-                    except:
-                        pass
-                
-                result_dict["total_amount"] = calc_total_amt
-                result_dict["total_quantity"] = calc_total_qty
+            # Convert final validated object to dictionary
+            if hasattr(invoice_obj, "model_dump"): result_dict = invoice_obj.model_dump()
+            elif hasattr(invoice_obj, "dict"): result_dict = invoice_obj.dict()
+            else: return {"error": f"Invalid format: {type(invoice_obj)}"}
+            
+            # Final safety recalculation of true backend totals
+            calc_total_amt = 0.0
+            calc_total_qty = 0.0
+            for item in result_dict.get("line_items", []):
+                try:
+                    q = float(str(item.get("quantity", 0)).replace(",", "").strip() or 0)
+                    p = float(str(item.get("unit_price", 0)).replace(",", "").strip() or 0)
+                    calc_total_qty += q
+                    calc_total_amt += (q * p)
+                except: pass
+            
+            result_dict["total_amount"] = calc_total_amt
+            result_dict["total_quantity"] = calc_total_qty
 
             return result_dict
             
@@ -149,7 +101,7 @@ def process_single_pdf_worker(args):
             return {"success": False, "index": index, "filename": filename, "error": error_msg, "temp_path": file_path}
 
         items = result.get("line_items", [])
-        live_progress_callback(90, f"Cleaned exact {len(items)} items. Finalizing...")
+        live_progress_callback(95, f"Finalized {len(items)} Validated Items.")
 
         return {
             "success": True, "index": index, "filename": filename, 

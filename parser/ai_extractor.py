@@ -50,7 +50,6 @@ Extract all invoice data into the structured format.
     
     return prompt
 
-
 def extract_invoice_level1(
     invoice_content: Dict[str, Any],
     source_file: str,
@@ -58,7 +57,7 @@ def extract_invoice_level1(
 ) -> Invoice:
     """
     Level-1 extraction: Initial AI extraction using structured outputs.
-    Automatically detects massive invoices and chunks them to avoid token limits.
+    Automatically detects massive invoices and chunks them by LOGICAL TABLES to avoid overlap.
     """
     if DEBUG:
         print("  Running Level-1 AI extraction...")
@@ -67,27 +66,20 @@ def extract_invoice_level1(
     tables = invoice_content.get('tables', [])
     
     # ─── Standard Extraction (Small to Medium Invoices) ───
-    # Lowered the threshold to play it safe
-    if len(text) < 12000 and len(tables) < 2:
-        if progress_callback:
-            progress_callback(30, "Extracting data with AI...")
-            
+    if len(text) < 15000 and len(tables) <= 3:
+        if progress_callback: progress_callback(30, "Extracting data with AI...")
         prompt = build_extraction_prompt(invoice_content)
         try:
             completion = client.beta.chat.completions.parse(
                 model=OPENAI_MODEL,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert invoice data extraction agent. Extract all information accurately. Use null for missing fields."
-                    },
+                    {"role": "system", "content": "You are an expert invoice data extraction agent. Extract all information accurately. Use null for missing fields."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format=Invoice,
                 temperature=TEMPERATURE
             )
             invoice = completion.choices[0].message.parsed
-            
             if invoice is None: raise ValueError("OpenAI returned no parsed content")
             
             invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
@@ -95,44 +87,32 @@ def extract_invoice_level1(
             return invoice
         except Exception as e:
             if DEBUG: print(f"  ⚠️ Standard extraction failed, falling back to chunking: {e}")
-            # If standard fails (e.g. token limit hit), WE DO NOT RAISE. 
-            # We let it naturally fall through to the chunking logic below!
 
-    # ─── Chunked Extraction (Massive Invoices like RDSL) ───
-    if DEBUG:
-        print("  ⚠️ Massive invoice or fallback detected. Initiating chunked extraction...")
-        
+    # ─── Chunked Extraction (Massive Invoices like RDSL / VW) ───
     if progress_callback:
-        progress_callback(20, "Massive invoice detected. Splitting into bite-sized chunks...")
+        progress_callback(20, "Massive invoice detected. Chunking intelligently by tables...")
         
-    # 💥 FIX: Make chunks much smaller (4,000 chars instead of 15,000)
-    chunk_size = 4000
-    text_chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    
-    # 💥 FIX: Process only 1 table per chunk
-    table_chunk_size = 1
-    table_chunks = [tables[i:i+table_chunk_size] for i in range(0, len(tables), table_chunk_size)]
-    
-    # Balance arrays so we iterate smoothly
-    num_chunks = max(len(text_chunks), len(table_chunks))
-    text_chunks += [''] * (num_chunks - len(text_chunks))
-    table_chunks += [[]] * (num_chunks - len(table_chunks))
+    # 💥 THE FIX: Chunk strictly by Tables, NOT by arbitrary text characters!
+    # This prevents cutting data in half and guarantees zero overlap.
+    table_chunk_size = 4 
+    table_chunks = [tables[i:i+table_chunk_size] for i in range(0, len(tables), table_chunk_size)] if tables else [[]]
     
     master_invoice = None
     all_line_items = []
     
-    for i in range(num_chunks):
+    for i, t_chunk in enumerate(table_chunks):
         if progress_callback:
-            # Scale progress dynamically
-            current_prog = 20 + int((i / num_chunks) * 55)
-            progress_callback(current_prog, f"Parsing chunk {i+1} of {num_chunks}...")
+            current_prog = 20 + int((i / len(table_chunks)) * 50)
+            progress_callback(current_prog, f"Parsing logical chunk {i+1} of {len(table_chunks)}...")
             
-        prompt = build_extraction_prompt({"text": text_chunks[i], "tables": table_chunks[i]})
+        # Pass the full text ONLY on the first chunk to establish metadata (Supplier, PO, etc).
+        # On subsequent chunks, we pass empty text to prevent AI from re-parsing old data.
+        chunk_text = text if i == 0 else "Refer strictly to the provided tables for continuing line items."
+        prompt = build_extraction_prompt({"text": chunk_text, "tables": t_chunk})
         
-        # Tell AI to ignore metadata on chunks 2+ to save processing tokens
         sys_msg = "You are an expert invoice data extraction agent."
         if master_invoice is not None:
-            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS. Leave metadata null."
+            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS from the tables. Leave metadata null."
             
         try:
             completion = client.beta.chat.completions.parse(
@@ -145,11 +125,8 @@ def extract_invoice_level1(
                 temperature=TEMPERATURE
             )
             chunk_invoice = completion.choices[0].message.parsed
-            
-            if chunk_invoice is None:
-                continue
+            if chunk_invoice is None: continue
                 
-            # Use the first successful chunk as the master metadata container
             if master_invoice is None:
                 master_invoice = chunk_invoice
                 all_line_items.extend(chunk_invoice.line_items)
@@ -158,24 +135,17 @@ def extract_invoice_level1(
                 
         except Exception as e:
             if DEBUG: print(f"  ⚠️ Chunk {i+1} failed: {e}")
-            continue # Skip bad chunks and push through to the end
+            continue 
             
     if not master_invoice:
         raise ValueError("All chunks failed to extract data. Token limit or API error.")
         
-    # Consolidate everything back together
     master_invoice.line_items = all_line_items
     master_invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
     master_invoice.extraction_metadata.source_file_name = source_file
     
-    if progress_callback:
-        progress_callback(80, "Consolidating extracted chunks...")
-        
-    if DEBUG:
-        print(f"  ✅ Chunking complete. Combined {len(all_line_items)} total line items.")
-        
+    if progress_callback: progress_callback(70, "Consolidating extracted chunks...")
     return master_invoice
-
 
 def extract_invoice_level2(
     invoice_content: Dict[str, Any],
