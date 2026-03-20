@@ -7,7 +7,8 @@ from bson import ObjectId
 # 💥 NEW: Cleanly import the models and logic from your new files
 from purchase_orders.schemas import (
     POStatus, PricingMode, CreatePORequest, StatusUpdateRequest, 
-    DiscrepancyReportRequest, LinkInvoicesRequest, LinkInvoicesResponse
+    DiscrepancyReportRequest, LinkInvoicesRequest, LinkInvoicesResponse,
+    LinkPIsRequest
 )
 from purchase_orders.discrepancy_report import generate_discrepancy_excel_bytes
 
@@ -119,6 +120,36 @@ async def update_po_status(po_id: str, body: StatusUpdateRequest, db=Depends(get
     await db["purchase_orders"].update_one({"_id": oid}, {"$set": {"status": body.status.value, "updated_at": datetime.utcnow()}})
     return {"po_id": po_id, "status": body.status.value}
 
+@router.patch("/{po_id}/proforma-invoices")
+async def update_po_proforma_invoices(po_id: str, body: dict, db=Depends(get_db)):
+    """Update the list of associated proforma invoice IDs on an existing PO."""
+    try: po_oid = ObjectId(po_id)
+    except: raise HTTPException(400, "Invalid PO ID format")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid})
+    if not po: raise HTTPException(404, "Purchase order not found")
+
+    pi_ids = body.get("proforma_invoice_ids", [])
+    if not isinstance(pi_ids, list):
+        raise HTTPException(400, "proforma_invoice_ids must be a list")
+
+    await db["purchase_orders"].update_one(
+        {"_id": po_oid},
+        {"$set": {"proforma_invoice_ids": pi_ids, "updated_at": datetime.utcnow()}}
+    )
+    return {"po_id": po_id, "proforma_invoice_ids": pi_ids, "message": "Proforma invoices updated"}
+
+@router.get("/{po_id}/proforma-invoices")
+async def get_po_proforma_invoices(po_id: str, db=Depends(get_db)):
+    """Get the proforma invoice IDs linked to a PO."""
+    try: po_oid = ObjectId(po_id)
+    except: raise HTTPException(400, "Invalid PO ID format")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid}, {"proforma_invoice_ids": 1})
+    if not po: raise HTTPException(404, "Purchase order not found")
+
+    return {"po_id": po_id, "proforma_invoice_ids": po.get("proforma_invoice_ids", [])}
+
 @router.get("/{po_id}/download")
 async def download_po_excel(po_id: str, db=Depends(get_db)):
     try: oid = ObjectId(po_id)
@@ -198,6 +229,90 @@ async def get_po_linked_invoices(po_id: str, db=Depends(get_db)):
             invoices_list = raw_data if isinstance(raw_data, list) else (raw_data.get("invoices") or raw_data.get("data") or [])
             return [{"_id": str(i.get("_id", "")), "invoice_number": i.get("invoice_number", "N/A"), "supplier_name": i.get("vendor_name", i.get("supplier_name", "Unknown")), "invoice_date": i.get("invoice_date"), "total_value": i.get("total_amount", i.get("total_value", 0.0))} for i in invoices_list if isinstance(i, dict)]
     except Exception as e: raise HTTPException(500, f"Failed to fetch linked invoices: {str(e)}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROFORMA INVOICE LINKING (PI ↔ PO)
+# ─────────────────────────────────────────────────────────────────────────────
+SHIPMENTS_API_BASE = "https://shipments-backend.morsebiz.com/api/v1/ops/orders"
+
+@router.get("/{po_id}/proforma-invoices")
+async def get_po_linked_pis(po_id: str, db=Depends(get_db)):
+    """Fetch details of all Proforma Invoices linked to this PO."""
+    try: po_oid = ObjectId(po_id)
+    except: raise HTTPException(400, "Invalid PO ID")
+
+    po = await db["purchase_orders"].find_one({"_id": po_oid}, {"proforma_invoice_ids": 1})
+    if not po: raise HTTPException(404, "Purchase order not found")
+
+    pi_ids = po.get("proforma_invoice_ids", [])
+    if not pi_ids:
+        return []
+
+    # Fetch PI details from Shipments backend
+    results = []
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        for pi_id in pi_ids:
+            try:
+                res = await client.get(f"{SHIPMENTS_API_BASE}/{pi_id}")
+                if res.status_code == 200:
+                    data = res.json()
+                    order = data.get("data", data) if isinstance(data, dict) else data
+                    results.append({
+                        "_id": str(pi_id),
+                        "pi_number": order.get("pi_number") or order.get("order_number", "—"),
+                        "buyer_name": (order.get("buyer_id", {}) or {}).get("cust_name", ""),
+                        "order_date": order.get("order_date"),
+                        "grand_total": order.get("grand_total", 0),
+                        "currency": order.get("currency", "INR"),
+                    })
+                else:
+                    results.append({"_id": str(pi_id), "pi_number": str(pi_id), "buyer_name": "", "grand_total": 0})
+            except:
+                results.append({"_id": str(pi_id), "pi_number": str(pi_id), "buyer_name": "", "grand_total": 0})
+    return results
+
+@router.patch("/{po_id}/link-pis")
+async def link_pis_to_po(po_id: str, request: LinkPIsRequest, db=Depends(get_db)):
+    """Link one or more Proforma Invoices to an existing PO."""
+    try: po_oid = ObjectId(po_id)
+    except: raise HTTPException(400, "Invalid PO ID")
+    if not await db["purchase_orders"].find_one({"_id": po_oid}):
+        raise HTTPException(404, "Purchase order not found")
+
+    result = await db["purchase_orders"].update_one(
+        {"_id": po_oid},
+        {
+            "$addToSet": {"proforma_invoice_ids": {"$each": request.proforma_invoice_ids}},
+            "$set": {"updated_at": datetime.utcnow()}
+        }
+    )
+    po_final = await db["purchase_orders"].find_one({"_id": po_oid}, {"proforma_invoice_ids": 1})
+    return {
+        "po_id": po_id,
+        "linked_count": len(request.proforma_invoice_ids),
+        "proforma_invoice_ids": po_final.get("proforma_invoice_ids", [])
+    }
+
+@router.delete("/{po_id}/unlink-pis")
+async def unlink_pis_from_po(po_id: str, request: LinkPIsRequest, db=Depends(get_db)):
+    """Remove one or more Proforma Invoices from an existing PO."""
+    try: po_oid = ObjectId(po_id)
+    except: raise HTTPException(400, "Invalid PO ID")
+    if not await db["purchase_orders"].find_one({"_id": po_oid}):
+        raise HTTPException(404, "Purchase order not found")
+
+    await db["purchase_orders"].update_one(
+        {"_id": po_oid},
+        {
+            "$pullAll": {"proforma_invoice_ids": request.proforma_invoice_ids},
+            "$set": {"updated_at": datetime.utcnow()}
+        }
+    )
+    po_final = await db["purchase_orders"].find_one({"_id": po_oid}, {"proforma_invoice_ids": 1})
+    return {
+        "po_id": po_id,
+        "proforma_invoice_ids": po_final.get("proforma_invoice_ids", [])
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 💥 NEW: DISCREPANCY REPORT GENERATOR (Cleaned Up)

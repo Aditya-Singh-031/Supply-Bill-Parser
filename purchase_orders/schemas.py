@@ -58,6 +58,9 @@ class LinkInvoicesResponse(BaseModel):
     failed: List[dict] = []
     invoice_ids: List[str]  
 
+class LinkPIsRequest(BaseModel):
+    proforma_invoice_ids: List[str] = Field(..., min_items=1, description="List of Proforma Invoice _id strings")
+
 class InvoiceSummary(BaseModel):
     _id: str
     invoice_number: str
