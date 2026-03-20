@@ -36,13 +36,15 @@ CRITICAL RULES:
 3. Convert all dates to YYYY-MM-DD format
 4. Convert all amounts to numbers (remove ₹, Rs, commas, spaces)
 5. Use null for any field that is not present or unclear
-6. Extract EVERY line item in the invoice table
+6. Extract EVERY line item from the TABLES EXTRACTED section below
 7. Preserve original text for part codes, HSN codes, descriptions
+8. IMPORTANT: Extract line items ONLY from the TABLES EXTRACTED section, NOT from the INVOICE TEXT. The INVOICE TEXT is for metadata only (invoice number, date, supplier, buyer, totals, etc.)
+9. Do NOT create duplicate line items. Each unique row in the table should appear exactly once.
 
-INVOICE TEXT:
+INVOICE TEXT (use for metadata only — invoice number, dates, seller, buyer, totals, addresses):
 {invoice_content['text']}
 
-TABLES EXTRACTED:
+TABLES EXTRACTED (use for line items — extract each row exactly once):
 {tables_text}
 
 Extract all invoice data into the structured format.
@@ -110,9 +112,9 @@ def extract_invoice_level1(
         chunk_text = text if i == 0 else "Refer strictly to the provided tables for continuing line items."
         prompt = build_extraction_prompt({"text": chunk_text, "tables": t_chunk})
         
-        sys_msg = "You are an expert invoice data extraction agent."
+        sys_msg = "You are an expert invoice data extraction agent. Extract line items ONLY from the TABLES section. Do NOT extract line items from the text body — use text only for metadata (invoice number, dates, seller, buyer, addresses, totals). Each table row should produce exactly one line item. Do NOT create duplicates."
         if master_invoice is not None:
-            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS from the tables. Leave metadata null."
+            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS from the tables. Leave metadata null. Do NOT repeat any items from previous chunks."
             
         try:
             completion = client.beta.chat.completions.parse(
