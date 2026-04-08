@@ -3,20 +3,19 @@ AI-powered invoice data extraction using OpenAI structured outputs.
 Supports Level-1 (initial extraction) and Level-2 (validation-driven correction).
 """
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
 from openai import OpenAI
 
 from models.invoice_schema import Invoice
-from parser.pdf_parser import format_tables_for_prompt
 from parser.config import OPENAI_API_KEY, OPENAI_MODEL, TEMPERATURE, DEBUG
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def build_chunk_prompt(chunk_content: str) -> str:
+def build_page_prompt(page_text: str) -> str:
     """
-    Build the prompt for a specific chunk of invoice text.
+    Build the prompt for a specific page of the invoice.
     """
     prompt = f"""You are an expert invoice data extraction agent specialized in Indian supply chain invoices.
 
@@ -30,8 +29,8 @@ CRITICAL RULES:
 7. Preserve original text for part codes, HSN codes, descriptions.
 8. Do NOT create duplicate line items. Each unique row should appear exactly once.
 
-INVOICE CONTENT CHUNK:
-{chunk_content}
+INVOICE PAGE CONTENT:
+{page_text}
 
 Extract all invoice data into the structured format.
 """
@@ -44,78 +43,61 @@ def extract_invoice_level1(
 ) -> Invoice:
     """
     Level-1 extraction: Initial AI extraction using structured outputs.
-    Automatically detects massive invoices and chunks them by strict character limits.
+    Uses Page-by-Page extraction for multi-page documents to guarantee accuracy and avoid token limits.
     """
     if DEBUG:
         print("  Running Level-1 AI extraction...")
         
     text = invoice_content.get('text', '')
-    tables_text = format_tables_for_prompt(invoice_content.get('tables', []))
     
-    # Combine everything into one string so we aren't reliant on bad PDF table mapping
-    full_content = f"--- INVOICE TEXT & METADATA ---\n{text}\n\n--- INVOICE TABLES ---\n{tables_text}"
-    
-    # ─── Standard Extraction (Small to Medium Invoices) ───
-    if len(full_content) < 12000:
-        if progress_callback: progress_callback(30, "Extracting data with AI...")
-        prompt = build_chunk_prompt(full_content)
-        try:
-            completion = client.beta.chat.completions.parse(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are an expert invoice data extraction agent. Extract all information accurately. Use null for missing fields."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format=Invoice,
-                temperature=TEMPERATURE
-            )
-            invoice = completion.choices[0].message.parsed
-            if invoice is None: raise ValueError("OpenAI returned no parsed content")
-            
-            invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
-            invoice.extraction_metadata.source_file_name = source_file
-            return invoice
-        except Exception as e:
-            if DEBUG: print(f"  ⚠️ Standard extraction failed, falling back to chunking: {e}")
+    # ─── Page-by-Page Extraction ───
+    # Split the raw text by the page delimiter added by the PDF parser
+    # We assume the parser adds something like "=== Page X ===" 
+    # If it doesn't, we fall back to a safe text chunking as a last resort.
+    pages = []
+    if "=== Page " in text:
+        raw_pages = text.split("=== Page ")
+        for p in raw_pages:
+            if p.strip():
+                pages.append(f"=== Page {p.strip()}")
+    else:
+        # Fallback if no page delimiters are found (should be rare if using pdfplumber/PyPDF2)
+        if progress_callback:
+            progress_callback(20, "No page breaks found. Executing safe string-chunking...")
+        def get_safe_chunks(raw_text, max_size=4000):
+            chunks = []
+            pos = 0
+            while pos < len(raw_text):
+                if pos + max_size >= len(raw_text):
+                    chunks.append(raw_text[pos:])
+                    break
+                window = raw_text[pos:pos+max_size]
+                last_newline = window.rfind('\n')
+                if last_newline == -1 or last_newline < max_size // 2:
+                    last_newline = max_size
+                chunks.append(raw_text[pos:pos+last_newline])
+                pos += last_newline + 1 
+            return chunks
+        pages = get_safe_chunks(text, max_size=4000)
 
-    # ─── Chunked Extraction (Massive Invoices like VW) ───
-    if progress_callback:
-        progress_callback(20, "Massive invoice detected. Executing safe string-chunking...")
-        
-    # 💥 THE FIX: Strict String Chunking 💥
-    # This guarantees the AI never receives more than 4000 characters at a time,
-    # ensuring it extracts 10-20 items per chunk and never hits the 4096 token limit crash.
-    def get_safe_chunks(raw_text, max_size=4000):
-        chunks = []
-        pos = 0
-        while pos < len(raw_text):
-            if pos + max_size >= len(raw_text):
-                chunks.append(raw_text[pos:])
-                break
-            window = raw_text[pos:pos+max_size]
-            last_newline = window.rfind('\n')
-            # If no newline found, or it's too far back, just cut it at max_size
-            if last_newline == -1 or last_newline < max_size // 2:
-                last_newline = max_size
-            chunks.append(raw_text[pos:pos+last_newline])
-            pos += last_newline + 1 # +1 to skip the newline character
-        return chunks
-
-    chunks = get_safe_chunks(full_content, max_size=4000)
-    
     master_invoice = None
     all_line_items = []
     
-    for i, chunk_text in enumerate(chunks):
+    num_pages = len(pages)
+    
+    if progress_callback:
+        progress_callback(20, f"Detected {num_pages} logical segments. Beginning extraction...")
+
+    for i, page_text in enumerate(pages):
         if progress_callback:
-            current_prog = 20 + int((i / len(chunks)) * 50)
-            progress_callback(current_prog, f"Parsing logical chunk {i+1} of {len(chunks)}...")
+            current_prog = 20 + int((i / num_pages) * 50)
+            progress_callback(current_prog, f"Parsing segment {i+1} of {num_pages}...")
             
-        prompt = build_chunk_prompt(chunk_text)
+        prompt = build_page_prompt(page_text)
         
         sys_msg = "You are an expert invoice data extraction agent."
         if master_invoice is not None:
-            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS found in this specific chunk. Leave metadata null. Do NOT hallucinate items from previous chunks."
+            sys_msg += " This is a CONTINUATION of a large invoice. Focus strictly on extracting the remaining LINE ITEMS found in this specific segment. Leave metadata null. Do NOT hallucinate items from previous segments."
             
         try:
             completion = client.beta.chat.completions.parse(
@@ -137,19 +119,18 @@ def extract_invoice_level1(
                 all_line_items.extend(chunk_invoice.line_items)
                 
         except Exception as e:
-            if DEBUG: print(f"  ⚠️ Chunk {i+1} failed: {e}")
+            if DEBUG: print(f"  ⚠️ Segment {i+1} failed: {e}")
             continue 
             
     if not master_invoice:
-        raise ValueError("All chunks failed to extract data. Token limit or API error.")
+        raise ValueError("All segments failed to extract data. Token limit or API error.")
         
     master_invoice.line_items = all_line_items
     master_invoice.extraction_metadata.extraction_timestamp = datetime.utcnow().isoformat()
     master_invoice.extraction_metadata.source_file_name = source_file
     
-    if progress_callback: progress_callback(70, "Consolidating extracted chunks...")
+    if progress_callback: progress_callback(70, "Consolidating extracted segments...")
     return master_invoice
-
 
 def extract_invoice_level2(
     invoice_content: Dict[str, Any],
@@ -160,9 +141,7 @@ def extract_invoice_level2(
     """
     Level-2 extraction: Correction based on validation feedback.
     """
-    # 💥 THE FIX: Level-2 Token Crash Preventer 💥
-    # OpenAI has a hard limit of 16,384 output tokens. Asking it to rewrite an array
-    # of 300+ items will always result in a LengthFinishReasonError crash.
+    # 💥 Level-2 Token Crash Preventer 💥
     if len(level1_invoice.line_items) > 75:
         if DEBUG:
             print("  ⚠️ Invoice exceeds 75 line items. Bypassing Level-2 full rewrite to prevent 16k output token limit crash.")
@@ -173,10 +152,7 @@ def extract_invoice_level2(
         print("  Running Level-2 AI correction...")
     
     text = invoice_content.get('text', '')
-    tables_text = format_tables_for_prompt(invoice_content.get('tables', []))
-    full_content = f"--- INVOICE TEXT & METADATA ---\n{text}\n\n--- INVOICE TABLES ---\n{tables_text}"
-    
-    initial_prompt = build_chunk_prompt(full_content)
+    initial_prompt = build_page_prompt(text)
     
     messages = [
         {
