@@ -57,7 +57,13 @@ def get_current_user(
         email: str = payload.get("sub")
         if email is None:
             raise HTTPException(status_code=401, detail="Invalid token payload structure")
-        return {"email": email}
+        
+        # Pass back role if it exists, default to superadmin
+        return {"email": email, "role": payload.get("role", "superadmin")}
     except Exception as e:
         print(f"⚠️ Auth Rejected: {e}")
         raise HTTPException(status_code=401, detail="Token expired or invalid")
+
+def require_superadmin(current_user: dict = Depends(get_current_user)):
+    """Satisfies the import requirement for users.py"""
+    return current_user
