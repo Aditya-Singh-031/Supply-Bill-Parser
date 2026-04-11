@@ -29,14 +29,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 💥 ROLE-BASED ACCESS CONTROL & MIDDLEWARE (UPDATED)
+# 💥 STANDALONE SECURITY BOUNCER
 # ─────────────────────────────────────────────────────────────────────────────
-# Set auto_error=False so it doesn't instantly crash if the header is missing 
-# (which allows us to check the query parameters next for SSE streams)
 security = HTTPBearer(auto_error=False)
 
 def get_current_user(
@@ -44,13 +41,10 @@ def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     token_query: Optional[str] = Query(None, alias="token")
 ):
-    """Decodes the JWT token from Header OR Query Param and extracts the user."""
+    """Decodes the JWT token from Header OR Query Param (for SSE)."""
     token = None
-    
-    # 1. Check Header (Standard API Requests)
     if credentials:
         token = credentials.credentials
-    # 2. Check Query Param (For SSE Streams)
     elif token_query:
         token = token_query
         
@@ -58,16 +52,12 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Not authenticated. Token missing.")
 
     try:
+        # Uses its own internal SECRET_KEY to verify the token it created
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
-        role: str = payload.get("role")
         if email is None:
-            raise HTTPException(status_code=401, detail="Invalid authentication token payload")
-        return {"email": email, "role": role}
-    except Exception:
-        raise HTTPException(status_code=401, detail="Could not validate credentials or token expired")
-
-def require_superadmin(current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "super-admin"]:
-        raise HTTPException(status_code=403, detail="Forbidden: Requires Super Admin privileges.")
-    return current_user
+            raise HTTPException(status_code=401, detail="Invalid token payload structure")
+        return {"email": email}
+    except Exception as e:
+        print(f"⚠️ Auth Rejected: {e}")
+        raise HTTPException(status_code=401, detail="Token expired or invalid")
