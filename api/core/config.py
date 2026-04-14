@@ -17,6 +17,7 @@ API_VERSION = "v1"
 API_PREFIX = f"/api/{API_VERSION}"
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
+BACKEND_URL = os.getenv("BACKEND_URL", "https://ops-backend.morsebiz.com")
 
 # CORS Settings
 CORS_ORIGINS = os.getenv(

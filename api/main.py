@@ -15,7 +15,7 @@ from api.services.database_service import DatabaseService
 # 💥 Import our bouncer
 from api.core.security import get_current_user 
 
-from api.routes import invoice, auth, users, dashboard, operations
+from api.routes import invoice, dashboard, operations
 from purchase_orders.routes import router as po_router
 from suppliers.routes import router as suppliers_router
 
@@ -59,7 +59,7 @@ app.add_middleware(
 # ─────────────────────────────────────────────────────────────────────────────
 # 🔓 UNPROTECTED ROUTES (Anyone can access)
 # ─────────────────────────────────────────────────────────────────────────────
-app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
+# app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 🔒 PROTECTED ROUTES (Requires valid JWT Token)
@@ -67,7 +67,7 @@ app.include_router(auth.router, prefix=API_PREFIX + "/auth", tags=["Auth"])
 protect = [Depends(get_current_user)]
 
 app.include_router(invoice.router,    prefix=API_PREFIX + "/invoices",   tags=["Invoices"], dependencies=protect)
-app.include_router(users.router,      prefix=API_PREFIX + "/users",      tags=["Users"]) # (Users already has require_superadmin inside)
+
 app.include_router(dashboard.router,  prefix=API_PREFIX + "/dashboard",  tags=["Dashboard"], dependencies=protect)
 app.include_router(operations.router, prefix=API_PREFIX + "/operations", tags=["Operations"], dependencies=protect)
 app.include_router(po_router,         prefix=API_PREFIX, tags=["Purchase Orders"], dependencies=protect)
