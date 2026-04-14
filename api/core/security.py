@@ -38,13 +38,17 @@ async def get_current_user(
             )
             
         if response.status_code != 200:
+            print(f"⚠️ Auth Backend Rejected Token: {response.status_code} - {response.text}")
             raise HTTPException(status_code=401, detail="Token expired or invalid in backend")
             
-        data = response.json()
-        if not data.get("success") or "user" not in data:
+        json_data = response.json()
+        payload_data = json_data.get("data", {})
+        
+        if not json_data.get("success") or "user" not in payload_data:
+            print(f"⚠️ Auth Backend response missing user: {json_data}")
             raise HTTPException(status_code=401, detail="Invalid token response from backend")
             
-        user = data["user"]
+        user = payload_data["user"]
         
         # Consistent return structure: {email, role, id}
         return {
@@ -53,11 +57,13 @@ async def get_current_user(
             "id": str(user.get("id") or user.get("_id", ""))
         }
     except httpx.RequestError as e:
-        print(f"⚠️ Auth Backend Error: {e}")
+        print(f"⚠️ Auth Backend Connection Error: {e}")
         raise HTTPException(status_code=503, detail="Authentication service unavailable")
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"⚠️ Auth Rejected: {e}")
-        raise HTTPException(status_code=401, detail="Token verification failed")
+        print(f"⚠️ Auth Unexpected Error: {type(e).__name__} - {e}")
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
 def require_superadmin(current_user: dict = Depends(get_current_user)):
     """Satisfies the import requirement for routes. Checks for Admin/SuperAdmin role."""
