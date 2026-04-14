@@ -29,6 +29,8 @@ if "https://ops.morsebiz.com" not in CORS_ORIGINS:
     CORS_ORIGINS.append("https://ops.morsebiz.com")
 if "https://bills-parser.morsebiz.com" not in CORS_ORIGINS:
     CORS_ORIGINS.append("https://bills-parser.morsebiz.com")
+if "https://ops-frontend.morsebiz.com" not in CORS_ORIGINS:
+    CORS_ORIGINS.append("https://ops-frontend.morsebiz.com")
 
 # Redis Settings
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
