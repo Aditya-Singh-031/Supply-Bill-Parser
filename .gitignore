@@ -227,3 +227,4 @@ Thumbs.db
 /temp_uploads
 *.xlsx
 /storage
+.DS_Store
